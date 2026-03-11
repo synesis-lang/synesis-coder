@@ -1,0 +1,586 @@
+[paths]
+#
+# bib_file: Defines the name of Better Bibtex file, and it's folder. It contains the abstracts to be processed.
+# csv_file: Defines the name of CSV file, and it's folder. It will contains reference and abstract columns.
+#
+bib_file = "input/mais_citados.bib"
+csv_file = "input/mais_citados_novo_prompt.csv"
+
+[abstract_processor]
+#
+# Claude private API key.
+# concurrent: Number of concurrent requests allowed.
+# retries: Number of retries for failed API calls.
+# batch_size: Number of abstracts per processing batch.
+# input_file: Default 'csv' input file name, with abstracts.
+# output_file: Default 'txt' output file name.
+#
+# AI_model = "claude-opus-4-20250514"
+AI_model = "claude-sonnet-4-5-20250929"
+api_key = ""
+concurrent = 5  # Tier 1 minimum 
+retries = 5
+batch_size = 25  # Reduce cooldown cycles
+input_file = "new_full_process/bibliometrics_all_453.bib"
+output_file = "new_full_process/bibliometrics_all_453.txt"
+log_file = "new_full_process/bibliometrics_all_453.log"
+
+[prompts]
+system_prompt = """
+You are analyzing scientific abstracts to extract factors and relationships influencing social acceptance of energy transition technologies, particularly offshore technologies. Your goal is to build analytically powerful semantic chains with complete textual units and concise analytical memos.
+"""
+
+task = """
+<task>
+Extract factors and analytically significant logical chains from scientific abstracts about energy transition social acceptance. Apply consistent generalization using the Stakeholder Measurability Criterion. Prioritize chains that reveal mechanisms, causal pathways, or theoretical insights over descriptive associations.
+</task>
+"""
+
+instructions = """
+<instructions>
+WORKFLOW: Extract complete excerpt → Apply Stakeholder Measurability Criterion → Score analytical value → Select relation type → Write description
+
+1. EXCERPT SELECTION - Complete Semantic Units:
+   Extract COMPLETE, SELF-CONTAINED semantic units (1-3 sentences). Must include: subject + verb + object + qualifiers.
+
+   GOOD: 'Community trust and environmental concern are the most important factors determining willingness to participate in renewable energy projects'
+   BAD: 'determining such willingness' (lacks subject/context)
+
+2. FACTOR EXTRACTION - Stakeholder Measurability Criterion:
+
+   DECISION RULE: 'Can a stakeholder directly perceive, measure, or act upon this concept without specialized technical/academic knowledge?'
+
+   For Community/Market/Socio-political factors:
+   - YES → Keep specific term when stakeholder experience differs meaningfully:
+     * 'Risk Perception', 'Procedural Justice', 'Place Attachment', 'Energy Independence'
+   - NO → Generalize to stakeholder-relevant core:
+     * 'institutional trust' + 'interpersonal trust' → 'Trust'
+     * 'distributive justice' + 'allocative fairness' → 'Justice'
+
+   For Technical-Scientific factors:
+   - PRESERVE technical terminology ('Life Cycle Assessment', 'Capacity Factor')
+   - Description MUST explain stakeholder relevance
+
+   PRESERVE DISTINCTIONS when stakeholder experiences differ:
+   - 'Policy' ≠ 'Regulation' | 'Acceptance' ≠ 'Resistance' | 'Willingness' ≠ 'Behavior'
+
+   FORMAT: Singular substantive forms, applied consistently
+
+   FACTOR GRANULARITY CONTROL (CRITICAL - Minimize concept proliferation):
+
+   AVOID COMPOUND FACTORS - Split into core + modifier when possible:
+   ✗ 'Responsible Research and Innovation Framework' → ✓ 'Research Framework' or 'Innovation Framework'
+   ✗ 'Community Energy Storage Implementation' → ✓ 'Storage Implementation' or 'Community Energy Storage'
+   ✗ 'Renewable Energy Deployment' → ✓ 'Deployment' (context is energy transition)
+   ✗ 'Participation Willingness' → ✓ 'Participation' or 'Willingness' (choose based on emphasis)
+
+   GENERALIZATION HIERARCHY (Apply from most general that preserves meaning):
+   Level 1 - Core concept: 'Acceptance', 'Deployment', 'Policy', 'Trust', 'Cost'
+   Level 2 - Qualified concept (when distinction matters): 'Public Acceptance', 'Technology Acceptance', 'Community Trust'
+   Level 3 - Full specification (only when Level 2 loses critical meaning): 'Offshore Wind Acceptance'
+
+   DECISION RULE FOR GRANULARITY:
+   Ask: 'Will this specific term appear in 5+ abstracts, or is it unique to this one?'
+   - Likely 5+ uses → Keep specific term (enables pattern detection)
+   - Likely 1-2 uses → Generalize to Level 1-2 (reduces noise)
+
+   EXAMPLES:
+   'Community Energy Storage' → 'Energy Storage' (unless community aspect is mechanistically crucial)
+   'Policy Incentive' → 'Policy' (incentive is implied in energy transition context)
+   'Environmental Concern' → 'Environment' (concern/value/perception can be generalized)
+   'Spatial Planning' → 'Planning' (spatial is implied when discussing deployment)
+
+   PRESERVE SPECIFICITY ONLY WHEN:
+   - Stakeholder experience meaningfully differs ('Procedural Justice' ≠ 'Justice')
+   - Technical precision required ('Life Cycle Assessment' vs generic 'Assessment')
+   - Core theoretical distinction ('Acceptance' ≠ 'Resistance', 'Policy' ≠ 'Regulation')
+
+3. ANALYTICAL VALUE SCORING:
+   Score 1-5 before extraction. Extract only 3-5.
+
+   Score 5: Reveals causal mechanism/multi-step pathway (explains HOW acceptance works)
+   Score 4: Shows enabling/shaping with clear mechanism
+   Score 3: Theoretically significant association (flag as *borderline*)
+   Score 2: Simple association without mechanism (SKIP)
+   Score 1: Trivial/obvious/redundant (SKIP)
+
+   TEST: 'Does this explain HOW or WHY social acceptance occurs?' → YES + mechanism visible = Extract
+
+3A. CHAIN SEPARATION (CRITICAL - Sequential vs Parallel Pathways):
+
+   SEQUENTIAL CHAINS (A→B→C): Keep in ONE block when factors form a causal pathway
+   Example: 'Ownership enables financing which enables deployment'
+   CORRECT: [-begin-][@ID@][!excerpt!][%mechanism%][#Ownership#][&enables&][#Financing#][&enables&][#Deployment#][-end-]
+
+   PARALLEL PATHWAYS (X,Y,Z→A): SEPARATE blocks when multiple factors independently affect same outcome
+   Example: 'Environmental concern, education, trust determine participation'
+   CORRECT (3 separate blocks):
+   [-begin-][@ID@][!excerpt!][%mechanism%][#Environmental Concern#][&influences&][#Participation Willingness#][-end-]
+   [-begin-][@ID@][!excerpt!][%mechanism%][#Education#][&influences&][#Participation Willingness#][-end-]
+   [-begin-][@ID@][!excerpt!][%mechanism%][#Trust#][&influences&][#Participation Willingness#][-end-]
+
+   MULTI-FACTOR CONVERGENCE (4+ factors → same outcome):
+   When 4+ factors converge on same outcome, preserve systemic insight:
+   - Create separate blocks for each factor-outcome relation
+   - In FIRST block description: Mention convergence pattern with *complex* flag
+   - Example: 'Environmental concern, education, trust, awareness, resistance determine participation'
+     Block 1: [#Environmental Concern#][&influences&][#Participation#]
+              Description: %*complex* Five-factor convergence (concern, education, trust, awareness, resistance) indicates participation requires integrated multi-domain intervention%
+     Blocks 2-5: Individual mechanisms for each factor
+
+   INCORRECT - Mixing parallel pathways in one block:
+   [-begin-][@ID@][!excerpt!][%mechanism%][#Cost#][&constrains&][#Deployment#][#Policy#][&enables&][#Deployment#][-end-]
+   This shows TWO DIFFERENT factors (Cost, Policy) → same outcome (Deployment) = MUST SPLIT
+
+   IDENTIFICATION RULE:
+   - Sequential: A affects B, B affects C → [#A#][&r1&][#B#][&r2&][#C#]
+   - Parallel: A affects C, B also affects C → TWO blocks: [#A#][&r1&][#C#] + [#B#][&r2&][#C#]
+
+   TEST: If the same factor appears TWICE in chain → parallel pathways → split blocks
+
+4. RELATIONSHIP TYPES:
+   Use ONLY these 5 (see <relation_types> for full definitions and direction rules):
+
+   'enables': Necessary condition (without A, B cannot occur)
+   'influences': Direct causal effect (A affects/changes B)
+   'constrains': Limits/restricts (A reduces options for B)
+   'contested-by': Active opposition (NOT for barriers)
+   'relates-to': Significant association (LAST RESORT, <5% of relations)
+
+   ELIMINATED: 'shapes', 'moderates', 'requires', 'correlates-with', 'accepted-by'
+   Priority: enables > influences > constrains > contested-by > relates-to
+
+   CONDITIONAL EFFECTS: Create TWO 'influences' chains + document interaction in descriptions
+
+5. ANALYTIC DESCRIPTION:
+   - ≤25 words (≤50 if *complex*)
+   - State mechanism/significance/rationale (NOT restatement)
+   - Add *borderline* if score 3, *complex* if >4 factors
+
+   GOOD: 'Reveals dual mechanism: Integration and Engagement independently enable transition via complementary pathways'
+   BAD: 'The excerpt describes how factors influence willingness'
+
+6. FORMAT (Sequential chains OR single relations):
+   Structure: [@ID@][!excerpt!][%description%][#FactorChain#]
+
+   - Reference: [@ID@] once per block
+   - Excerpt: [! complete semantic unit !] (same for all blocks from same excerpt)
+   - Description: [% mechanism/significance %] (can differ per chain)
+   - Factors: Singular substantive forms
+
+   CHAIN FORMATS:
+   - Single relation: [#A#][&relation&][#B#]
+   - Sequential chain: [#A#][&r1&][#B#][&r2&][#C#] or longer if needed
+
+   VERIFY: Check if same factor appears multiple times in different positions
+   - If YES → parallel pathways → split into separate blocks
+   - If NO → sequential chain → keep in one block
+</instructions>
+"""
+
+relation_types = """
+<relation_types>
+PRIORITY: enables > influences > constrains > contested-by > relates-to
+
+1. 'enables': Necessary condition (without A, B cannot occur)
+   Test: 'Can B exist without A?' NO → use enables | Direction: prerequisite → outcome
+
+2. 'influences': Direct causal effect (A affects/changes B, positive or negative)
+   Test: 'Does A increase/decrease/modify B?' YES → use influences | Direction: cause → effect
+
+3. 'constrains': Limits/restricts (A reduces possibilities for B)
+   Test: 'Does A impose boundaries on B?' YES → use constrains | Direction: limiter → constrained
+
+4. 'contested-by': Active opposition (NOT technical/economic barriers)
+   Test: 'Does A actively resist B?' YES → use contested-by | Direction: contested → opponent
+
+5. 'relates-to': Theoretically significant association (LAST RESORT, <5%)
+   Requires justification. Flag *borderline* if score=3
+
+DIRECTION RULES - Linguistic Cues:
+
+REVERSE direction when text uses:
+• Goal: 'in order to', 'to achieve', 'for'
+  'Policy needed to enable deployment' → [#Policy#][&enables&][#Deployment#]
+• Dependency: 'requires', 'depends on', 'needs', 'relies on'
+  'Deployment requires policy' → [#Policy#][&enables&][#Deployment#]
+• Limitation: 'is limited by', 'is constrained by'
+  'Deployment limited by cost' → [#Cost#][&constrains&][#Deployment#]
+
+MAINTAIN direction when text uses:
+• Causal: 'leads to', 'causes', 'drives', 'results in'
+  'Trust leads to acceptance' → [#Trust#][&influences&][#Acceptance#]
+• Enabling: 'enables', 'facilitates', 'allows'
+  'Financing enables investment' → [#Financing#][&enables&][#Investment#]
+• Effect: 'increases', 'decreases', 'affects'
+  'Cost affects deployment' → [#Cost#][&influences&][#Deployment#]
+
+MODERATION/INTERACTION:
+'C changes A→B relationship' = TWO chains: A influences B + C influences B
+Example: 'Trust moderates cost-acceptance'
+  → [#Cost#][&influences&][#Acceptance#] + [#Trust#][&influences&][#Acceptance#]
+  Document interaction in both descriptions
+
+LOGIC CHECK: Prerequisite/cause FIRST → Outcome/effect SECOND
+Avoid: circular chains, illogical reversals (Acceptance enables Trust)
+</relation_types>
+"""
+
+critical_reminders = """
+<critical_reminders>
+PRE-EXTRACTION CHECKLIST:
+✓ Excerpt is complete semantic unit (1-3 sentences, self-contained)
+✓ Scored 3-5 (explains HOW/WHY acceptance occurs)
+✓ Applied Stakeholder Measurability Criterion to factors
+✓ Applied Granularity Control (avoid compound factors, use Level 1-2 when possible)
+✓ Selected one of 5 relation types (enables/influences/constrains/contested-by/relates-to)
+✓ Verified direction: prerequisite/cause FIRST → outcome/effect SECOND
+✓ Description states mechanism (≤25 words, ≤50 if *complex*)
+✓ Added *borderline* flag if score=3
+✓ For 4+ factors→same outcome: Add *complex* flag + list convergence in FIRST block
+
+FORMAT VALIDATION (CRITICAL):
+✓ Sequential chains (A→B→C): Keep in ONE block
+✓ Parallel pathways (A→C, B→C): SPLIT into separate blocks
+✓ TEST: Does same factor appear twice? YES = parallel = split blocks
+✓ Chain example: [#Ownership#][&enables&][#Financing#][&enables&][#Deployment#]
+✓ Parallel example: Split [#Cost#][&constrains&][#Deploy#][#Policy#][&enables&][#Deploy#]
+   Into: [#Cost#][&constrains&][#Deploy#] + [#Policy#][&enables&][#Deploy#]
+
+GRANULARITY QUICK-CHECK:
+✗ 'Community Energy Storage Implementation' → ✓ 'Energy Storage' or 'Storage Implementation'
+✗ 'Responsible Research Innovation Framework' → ✓ 'Research Framework' or 'Innovation Framework'
+✗ 'Renewable Energy Deployment' → ✓ 'Deployment'
+Ask: Will this exact term appear 5+ times across 450 abstracts? NO → Simplify to Level 1-2
+
+MULTI-FACTOR CONVERGENCE:
+When 4+ factors → same outcome:
+Block 1 description: %*complex* X-factor convergence: list all factors, explain integrated nature%
+Blocks 2-X: Individual mechanisms for each factor
+
+DIRECTION QUICK-CHECK:
+'requires/depends on' → REVERSE to enables
+'limited by/constrained by' → REVERSE to constrains
+'leads to/causes/enables' → MAINTAIN direction
+
+QUALITY STANDARD: 3 powerful chains > 10 weak chains
+Skip trivial/redundant connections
+Minimize unique concepts (aim for <150 unique factors across 450 abstracts)
+</critical_reminders>
+"""
+
+output_format = """
+<output_format>
+Format your analysis exactly as follows:
+
+[-begin_header-]
+referencia_bibtex: {reference_id}
+descricao: [one sentence summarizing the abstract's core focus]
+modelo_epistemico: [knowledge area/theoretical framework employed]
+metodo: [data collection method if mentioned: survey, interview, statistics, etc.]
+[-end_header-]
+
+[-begin-][@{reference_id}@][!Exact text excerpt!][%Brief description (max 25 words)%][#Factor chain#][-end-]
+
+CRITICAL FORMAT RULES - Sequential vs Parallel Pathways:
+
+SEQUENTIAL CHAINS (A→B→C): Keep in ONE block
+- Example: 'Ownership enables financing which enables deployment'
+- Format: [-begin-][@{reference_id}@][!excerpt!][%mechanism%][#Ownership#][&enables&][#Financing#][&enables&][#Deployment#][-end-]
+
+PARALLEL PATHWAYS (multiple factors → same outcome): Create SEPARATE blocks
+- Example: 'Trust, cost, and policy affect acceptance' becomes THREE blocks:
+  [-begin-][@{reference_id}@][!excerpt!][%mechanism%][#Trust#][&influences&][#Acceptance#][-end-]
+  [-begin-][@{reference_id}@][!excerpt!][%mechanism%][#Cost#][&influences&][#Acceptance#][-end-]
+  [-begin-][@{reference_id}@][!excerpt!][%mechanism%][#Policy#][&influences&][#Acceptance#][-end-]
+
+MULTI-FACTOR CONVERGENCE (4+ factors → same outcome): Preserve systemic insight
+- When 4+ factors converge, mention pattern in FIRST block with *complex* flag
+- Example: 'Concern, education, trust, awareness, resistance determine participation'
+  Block 1: [-begin-][@{reference_id}@][!excerpt!][%*complex* Five-factor convergence (concern, education, trust, awareness, resistance) requires integrated intervention across domains%][#Environmental Concern#][&influences&][#Participation#][-end-]
+  Blocks 2-5: Individual mechanisms for education, trust, awareness, resistance
+
+WRONG - Mixing parallel pathways in one block:
+[-begin-][@{reference_id}@][!excerpt!][%...%][#Cost#][&constrains&][#Deployment#][#Policy#][&enables&][#Deployment#][-end-]
+This shows Cost→Deployment AND Policy→Deployment = TWO separate blocks needed!
+
+TEST: If same factor appears TWICE in chain → parallel pathways → SPLIT blocks
+
+FACTOR GRANULARITY CONTROL (Minimize concept proliferation across 450 abstracts):
+- AVOID compound factors: 'Community Energy Storage Implementation' → 'Energy Storage' or 'Storage Implementation'
+- AVOID redundant qualifiers: 'Renewable Energy Deployment' → 'Deployment' (context is energy transition)
+- Use Level 1-2 generalization: 'Environmental Concern' → 'Environment', 'Policy Incentive' → 'Policy'
+- Keep specificity ONLY when: stakeholder experience differs OR technical precision required OR core theoretical distinction
+- Ask: 'Will this exact term appear 5+ times across abstracts?' NO → Use simpler term
+- Target: <150 unique factors across 450 abstracts (avg 3-5 chains per abstract)
+
+Provide 3-5 significant chains/relationships per abstract.
+Use consistent terminology to minimize unique concept proliferation.
+</output_format>
+"""
+
+[report_generator]
+report_file = "input/report_mais_citados.html"
+txt_input_file = "input/mais_citados_honey.txt"
+csv_input_abstracts = "input/mais_citados.csv"
+
+[analysis]
+top_n = 10
+include_semantics = true
+max_nodes_viz = 10
+
+[database]
+host = "localhost"
+user = "debritto"
+password = "240197"
+database_name = "dgt7_factors"
+
+
+[topic_processor]
+AI_model = "claude-sonnet-4-5-20250929"
+api_key = "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"
+concurrent = 3
+retries = 5
+batch_size = 20
+input_file = "new_full_process/bibliometrics_all_453_memory.json"
+output_file = "new_full_process/bibliometrics_all_453_topics.csv"
+log_file = "new_full_process/bibliometrics_all_453_topics.log"
+
+[topic_prompts]
+system_prompt = """You are an expert in Energy Transition Sociology and Semantic Classification. You classify scientific concepts into thematic groups, aspects, and dimensions based on their semantic profiles and relational patterns in energy transition research."""
+
+classification_prompt = """# Expert Topic Classification with Rich Semantic Context
+
+You are classifying a factor from energy transition research. Use the semantic, hierarchical, and partitive context provided to make informed decisions about its thematic group, aspect, and dimension.
+
+{{factor_context}}
+
+## Your Task
+
+Classify this factor into:
+1. **thematic_group**: Consolidated category (15-25 total groups maximum)
+2. **aspect_number**: Primary nature (0-15)
+3. **dimension_number**: Social acceptance context (0-4)
+4. **confidence**: Base confidence partly on statistics: HIGH if frequency >10 and sources >5; MEDIUM if frequency 5-10 or sources 3-5; LOW otherwise
+5. **reasoning**: Brief explanation (max 50 words)
+6. **factor_description**: Contextual synthesis (40-80 words)
+7. **rgt_element_a**: Positive/functional pole of RGT bipolar construct
+8. **rgt_element_b**: Negative/reduced pole of RGT bipolar construct
+
+## Classification Framework
+
+### Aspect Classifications (Primary Nature):
+- **[0]**: Not identified
+- **[1]**: Quantitative – Measurements, statistics, discrete amounts
+- **[2]**: Spatial – Location, geography, spatial relations
+- **[3]**: Kinematic - Movement, flow, dynamics
+- **[4]**: Physical - Material properties, forces, energy systems
+- **[5]**: Biotic - Ecological, environmental, health impacts
+- **[6]**: Sensitive - Perception, awareness, emotional responses
+- **[7]**: Analytical - Research, analysis, methodological elements
+- **[8]**: Formative - Planning, design, innovation, cultural–historical context
+- **[9]**: Lingual - Communication, documentation, information
+- **[10]**: Social - Community relations, networks, collective dynamics
+- **[11]**: Economic - Costs, markets, finance, incentives
+- **[12]**: Aesthetic - Visual, aesthetics, harmonic qualities
+- **[13]**: Juridical - Legal, regulatory, governance frameworks
+- **[14]**: Ethical - Moral responsibility, fairness, duty
+- **[15]**: Fiducial - Trust, belief, values, worldview
+
+### Dimension Classifications (Social Acceptance Context):
+- **[0]**: Not identified
+- **[1]**: Community Acceptance - Residents, local actors and stakeholders
+- **[2]**: Market Acceptance - Consumers, investors, market patterns
+- **[3]**: Socio-political Acceptance - Institutions, society, governance
+- **[4]**: Technical-scientific - Scientific, analytical, technical and theorethical assessment
+
+## Context-Aware Classification Rules
+
+**CLASSIFICATION PRIORITY HIERARCHY**:
+
+### PRIMARY: Factor Semantic Meaning & Usage Context
+The **semantic domain of the factor name** determines the base classification:
+- Economic terms → aspect 11, dimension 2
+- Governance/regulation → aspect 13, dimension 3
+- Psychological/trust/attitudes → aspect 15 or 6, dimension 1
+- Environmental/impact/ecology → aspect 5
+- Technical/method/assessment → aspect 7, dimension 4
+- Social/community/participation → aspect 10, dimension 1
+
+Usage contexts refine meaning:
+- Inspect all 1–3 usage examples.
+- Identify domain of application, stakeholder relevance, and functional scope.
+
+### SECONDARY — Relations Profile (Refinement in Ambiguous Cases)
+
+Use relation types only to refine classification when the semantic domain of the factor remains ambiguous. 
+Relations do NOT determine the aspect. Any aspect may contain enabling, constraining, or influencing factors.
+
+- Mainly **constrains** → may indicate barrier-like interpretation. Use this to refine (not determine) the aspect by checking whether the factor functions as: regulatory obstacle, socio-cultural resistance, economic limitation, or environmental constraint.
+
+- Mainly **enables** → may indicate facilitator-like interpretation. Use this only to clarify its functional role within the already-identified semantic domain (social, formative, technological, economic, etc.).
+
+- **Influences** perceptions/behavior → may suggest the factor acts through perceptual, psychosocial, communicative, or trust-related pathways. Use this merely as supplementary evidence.
+
+- Frequently appears as **target** in chains → may indicate that the factor functions as an outcome, condition, or state within its domain (e.g., operational, environmental, social, formative). This does not alter the aspect, only clarifies orientation.
+
+### TERTIARY: Co-occurrence Patterns (Clarification Only)
+Use co-factors merely to disambiguate dimensions:
+- Co-occurs with [policy/governance] → dimension 3
+- Co-occurs with [community/trust/local] → dimension 1
+- Co-occurs with [market/finance/consumer] → dimension 2
+- Co-occurs with [research/method/analysis] → dimension 4
+
+### QUATERNARY: Statistical Profile (Evidence Strength Refinement)
+Use frequency and sources to adjust confidence or granularity:
+- High frequency (>10) and broad sources (>5) → Prioritize stable parent categories; boost confidence to HIGH.
+- Low frequency (<5) or narrow sources (<3) → Flag as tentative; lower confidence to LOW/MEDIUM.
+
+Critical rule: Semantic meaning > relations > co-occurrence > statistics.
+
+### QUINTERNARY — Hierarchical and Partitive Semantics (Taxonomic Logic)
+
+1. **Hypernym–Hyponym (Hierarchical Semantics)**
+If the factor is a **specific subtype**, identify its **hypernym** and classify according to that parent-level category.  
+- Example: “coastal visual impact of offshore wind blades” → hypernym: environmental/aesthetic → classify at the parent level.
+
+2. **Meronym–Holonym (Partitive Semantics)**
+If the factor is a **part of a larger system** (component, sub-element, sub-process), orient classification by the **holonym**, not the isolated part.  
+- Example: “transmission cables” → holonym: grid infrastructure → classify under “Infrastructure”.
+
+3. **Function of Taxonomic Rules**
+- Prevent over-fragmentation of thematic groups.  
+- Maintain stable parent-level categories.  
+- Ensure consistent semantic grouping across related factors.  
+- Align classification with formal ontologies (WordNet, BFO, DOLCE) and knowledge-graph engineering practices.
+
+### Thematic Categories - Soft Guidelines (Parent-Level Only)
+
+Target: 12–18 broad, conceptually distinct parent categories.
+
+Suggested parent categories (illustrative, non-exhaustive):
+- Governance  
+- Economics  
+- Worldview  
+- Technology  
+- Environment  
+- Social  
+- Knowledge  
+- Behavior  
+- Communication  
+- Infrastructure  
+- Planning  
+- Research  
+- Participation  
+- Risk  
+- Actors  
+
+#### Granularity Rule
+Always choose **parent-level categories**, not subtypes.
+
+##### Self-Check Before Assigning a Category
+1. Does it fit an existing parent category? → Use it.
+2. Is the category at the same granularity level? → Must be parent-level.
+3. Would 3+ other factors fit here? → If not, category too specific.
+4. Is this factor only **part of a system**? → Classify by the holonym.
+5. Is this factor only a **specific subtype**? → Classify by the hypernym.
+
+###  GOOD Classification (Examples)
+- “Regulatory Framework” → Governance  
+- “Investment Cost” → Economics  
+- “Public Trust” → Worldview  
+- “Offshore Wind Technology” → Technology or Infrastructure
+
+### BAD Classification (Examples)
+- “Policy & Regulation” (too specific) → Use Governance  
+- “Financial Aspects” → Economics  
+- “Community Attitudes” → Psychology or Social  
+- “Renewable Energy Systems” → Technology or Infrastructure
+
+## Factor Description Guidelines
+
+**PURPOSE**: Define what the factor IS conceptually (40-80 words)
+
+Provide a semantic definition based primarily on the usage contexts provided in the JSON data:
+
+1. **Core meaning**: What the concept represents or denotes in the energy transition domain
+2. **Conceptual nature**: Essential characteristics that distinguish it from related concepts
+3. **Stakeholder understanding**: How it is perceived or experienced in practice (inferred from context examples)
+4. **Domain context**: Its established meaning in energy transition acceptance literature
+
+**CRITICAL**:
+- Base the definition PRIMARY on the 1-3 usage context examples provided in the JSON `contexts` field
+- Use relational connections (co-factors, relation types) as SECONDARY clarification only
+- Focus on WHAT the factor IS, not on its analytical classification
+
+## Reasoning Guidelines
+
+**PURPOSE**: Justify classification decisions based on semantic analysis and data patterns (40-60 words)
+
+Structure your reasoning with these 4 components:
+
+1. **Aspect classification** (10-15 words): State the assigned aspect number and explain why the factor belongs to this modal aspect
+2. **Functional role inferred from relations** (10-15 words): Identify dominant relation types (enables/constrains/influences) and the factor's primary function
+3. **Relational patterns observed** (10-15 words): Note the most frequent co-factors that clarify the factor's operational context
+4. **Dimension assignment with context** (10-15 words): State the Wüstenhagen dimension and justify based on stakeholder relevance
+5. **Evidence strength from statistics** (10-15 words): Evaluate frequency and sources for robustness (e.g., high frequency indicates central concept; broad sources reduce bias).
+
+## RGT Bipolar Construct Guidelines
+
+Convert the factor into a **Repertory Grid Technique (RGT)** bipolar construct with two opposing poles representing a psychologically or sociotechnically meaningful continuum:
+
+**Core Principle**: Transform unidimensional categories into contrastive pairs that allow comparative evaluation. The positive pole typically expresses the functional, desirable, or maximized form; the negative pole expresses the absent, reduced, compromised, or opposite form.
+
+**Construction Rules**:
+- **Psychological/Social factors**: Use natural oppositions that reflect stakeholder experience
+  - Trust → "High Trust" vs "Low Trust"
+  - Acceptance → "High Acceptance" vs "Low Acceptance"
+  - Awareness → "High Awareness" vs "Low Awareness"
+  - Engagement → "High Engagement" vs "Low Engagement"
+
+- **Economic factors**: Reverse polarity for cost-related concepts
+  - Cost → "Low Cost" vs "High Cost" (low is desirable)
+  - Benefit → "High Benefit" vs "Low Benefit" (high is desirable)
+  - Financing → "Easy Financing Access" vs "Difficult Financing Access"
+
+- **Governance/Institutional**: Use functional vs dysfunctional poles
+  - Governance → "Effective Governance" vs "Ineffective Governance"
+  - Policy → "Clear Policy Framework" vs "Unclear Policy Framework"
+  - Regulation → "Adequate Regulation" vs "Inadequate Regulation"
+
+- **Environmental**: Use impact directionality
+  - Impact → "Positive Impact" vs "Negative Impact"
+  - Environment → "Environmental Protection" vs "Environmental Degradation"
+
+- **Abstract factors**: Convert to functional polarities
+  - Energy Independence → "Energy Independence" vs "Energy Dependence"
+  - Community Engagement → "High Community Engagement" vs "Low Community Engagement"
+  - Spatial Planning → "Effective Spatial Planning" vs "Ineffective Spatial Planning"
+
+**Critical Requirements**:
+1. Poles must be empirically distinguishable and evaluatively meaningful
+2. Preserve the original concept's semantic core—avoid external interpretations
+3. Use clear, stakeholder-comprehensible language
+4. Ensure poles reflect variation in psychological/social/technical experience
+5. Avoid purely semantic oppositions; focus on functional/experiential contrasts
+
+## Output Format
+
+Return ONLY a single CSV line (no header):
+```
+factor,topic,aspect,dimension,confidence,reasoning,factor_description,rgt_element_a,rgt_element_b
+```
+
+**Example:**
+```
+Cost,Economics,11,2,HIGH,"Mainly constrains Deployment. Co-factors: Policy+Technology. Market dimension context.","Economic factor that acts as a barrier to technology deployment. High costs constrain implementation while cost reduction enables market acceptance. Frequently interacts with policy incentives.","Low Cost","High Cost"
+```
+
+**Critical:**
+- Return ONLY the CSV line
+- Use double quotes around reasoning, factor_description, rgt_element_a, and rgt_element_b
+- Confidence: LOW, MEDIUM, or HIGH
+- Aspect: 0-15, Dimension: 0-4
+- RGT poles must be contextually meaningful and preserve the factor's core meaning
+
+Now classify the factor above."""

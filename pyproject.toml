@@ -1,0 +1,22 @@
+[project]
+name = "synesis-coder"
+version = "0.0.1"
+requires-python = ">=3.10"
+dependencies = [
+    "synesis>=0.3.0",
+    "anthropic>=0.40.0",
+    "click>=8.0",
+    "tenacity>=8.0",
+    "bibtexparser>=1.4",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+synesis-coder = "synesis_coder.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
