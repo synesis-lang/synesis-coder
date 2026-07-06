@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.7.1] — 2026-07-05
+
+### Added
+
+- **Conexão de crítica (2ª API) para `critique` e `refine`** (`llm_client.py`, `modes/critique_mode.py`, `modes/refine_mode.py`, `.env.example`)
+  - `LLMClient` ganha os parâmetros opcionais `api_url` e `api_key` (além do já existente `backend`), com fallback ao ambiente — permite instanciar clients com conexões explícitas, mantendo comportamento idêntico quando omitidos (retrocompatível bit-a-bit).
+  - `get_critique_connection()` resolve a família `SYNESIS_CODER_CRITIQUE_{BACKEND,API_URL,API_KEY}`; cada eixo omitido herda a conexão primária. A fase `critique` e o **crítico** do `refine` passam a usar essa conexão; o **gerador** do refine e as demais fases seguem na conexão primária.
+  - Habilita independência epistêmica real (ex.: gerador no OpenRouter + crítico na Anthropic nativa) sem afetar as outras fases. Ver Planning/Estudo_API_por_Fase.md.
+  - `_validate_phase_env` **não** foi alterado (contenção de blast-radius); a conexão de crítica é resolvida na instanciação do client.
+
+### Changed
+
+- **`.env` simplificado** — seção "ATIVO AGORA" consolida conexão primária, conexão de crítica opcional, modelos/thresholds por fase e parâmetros globais; seção "Pipeline ACT" separada removida. Sem mudança nas variáveis efetivamente lidas.
+
+---
+
 ## [0.7.0] — 2026-07-05
 
 ### Added

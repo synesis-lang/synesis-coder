@@ -73,6 +73,34 @@ def _get_model() -> str:
     return os.environ.get("SYNESIS_CODER_MODEL", "claude-opus-4-6")
 
 
+def get_critique_connection() -> dict:
+    """Resolve a conexão (backend/api_url/api_key) da fase de CRÍTICA.
+
+    A "conexão de crítica" é usada pela fase `critique` e pelo crítico do modo
+    `refine`. Permite avaliar as anotações num provedor distinto do gerador
+    (independência epistêmica real), sem afetar as demais fases.
+
+    Precedência por eixo: var SYNESIS_CODER_CRITIQUE_* → conexão global.
+    Se NENHUMA var CRITIQUE_* de conexão for definida, retorna dict cujos valores
+    são None → o LLMClient cai no fallback de ambiente do backend resolvido,
+    reproduzindo o comportamento atual (retrocompatível).
+
+    O `api_key` fica None quando não há CRITIQUE_API_KEY explícita: o __init__
+    então resolve a chave certa para o backend da crítica (ANTHROPIC_API_KEY se
+    anthropic, SYNESIS_CODER_API_KEY se openai) — que pode diferir do backend
+    primário.
+
+    Returns:
+        Dict com chaves "backend", "api_url", "api_key" pronto para
+        LLMClient(model=..., **conn). Valores None acionam o fallback do __init__.
+    """
+    return {
+        "backend": os.environ.get("SYNESIS_CODER_CRITIQUE_BACKEND") or None,
+        "api_url": os.environ.get("SYNESIS_CODER_CRITIQUE_API_URL") or None,
+        "api_key": os.environ.get("SYNESIS_CODER_CRITIQUE_API_KEY") or None,
+    }
+
+
 def _get_max_retries() -> int:
     return int(os.environ.get("SYNESIS_CODER_MAX_RETRIES", "3"))
 
@@ -207,6 +235,8 @@ class LLMClient:
         self,
         model: Optional[str] = None,
         backend: Optional[str] = None,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         max_rpm: Optional[int] = None,
         max_input_tpm: Optional[int] = None,
         max_output_tpm: Optional[int] = None,
@@ -217,6 +247,11 @@ class LLMClient:
         Args:
             model: ID do modelo (padrão: env SYNESIS_CODER_MODEL ou claude-opus-4-6).
             backend: Backend LLM ("anthropic" | "openai"). Padrão: env SYNESIS_CODER_BACKEND.
+            api_url: Base URL do backend openai-compat. None = env SYNESIS_CODER_API_URL.
+                Ignorado no backend anthropic. Permite uma conexão explícita
+                (ex.: 2ª API para a fase de crítica), independente da global.
+            api_key: Chave de API. None = env (ANTHROPIC_API_KEY no backend anthropic,
+                SYNESIS_CODER_API_KEY no backend openai). Permite conexão explícita.
             max_rpm: Limite de requisições por minuto (apenas Anthropic).
             max_input_tpm: Limite de tokens de input por minuto (apenas Anthropic).
             max_output_tpm: Limite de tokens de output por minuto (apenas Anthropic).
@@ -230,8 +265,8 @@ class LLMClient:
             import openai
 
             self._client = openai.OpenAI(
-                base_url=f"{_get_api_url()}/v1",
-                api_key=_get_api_key(),
+                base_url=f"{api_url or _get_api_url()}/v1",
+                api_key=api_key or _get_api_key(),
             )
             self._rate_limit_enabled = False
             self._retryable_errors: tuple = (
@@ -241,7 +276,9 @@ class LLMClient:
         else:
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=_get_anthropic_api_key())
+            self._client = anthropic.Anthropic(
+                api_key=api_key or _get_anthropic_api_key()
+            )
             self._rate_limit_enabled = True
             self._retryable_errors = (
                 anthropic.RateLimitError,

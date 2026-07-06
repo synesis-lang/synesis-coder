@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from synesis_coder.block_assembler import assemble_items
-from synesis_coder.llm_client import LLMClient
+from synesis_coder.llm_client import LLMClient, get_critique_connection
 from synesis_coder.modes.critique_mode import (
     _critique_tags,
     _extract_item_blocks_with_bibrefs,
@@ -438,7 +438,11 @@ async def _process_refine_async(
     )
 
     # Crítico != gerador — clients (e modelos) distintos (§3.3).
-    critique_client = LLMClient(model=critique_model)
+    # Crítico → conexão de crítica (2ª API opcional); gerador → conexão primária.
+    # Isso concretiza a independência epistêmica: crítico pode rodar em
+    # provedor/família distinta do gerador. Sem vars CRITIQUE_* de conexão,
+    # ambos usam a conexão global (comportamento atual).
+    critique_client = LLMClient(model=critique_model, **get_critique_connection())
     refine_client = LLMClient(model=refine_model)
     runtime_banner(refine_client, format=format)
 

@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from synesis_coder.llm_client import LLMClient
+from synesis_coder.llm_client import LLMClient, get_critique_connection
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_critique_prompt
 from synesis_coder.runtime_info import runtime_banner
@@ -452,8 +452,10 @@ async def _process_critique_async(
         syn_path.name, total_items, suspicion_threshold,
     )
 
-    # 4. Inicializar LLM client com modelo de critique
-    llm_client = LLMClient(model=model)
+    # 4. Inicializar LLM client com modelo e conexão de critique.
+    #    A conexão de crítica (2ª API opcional) permite avaliar num provedor
+    #    distinto do gerador; sem vars CRITIQUE_* de conexão, herda a global.
+    llm_client = LLMClient(model=model, **get_critique_connection())
     runtime_banner(llm_client, format=format)
 
     # 5. Processar ITEMs de forma concorrente
