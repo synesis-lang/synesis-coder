@@ -86,13 +86,14 @@ class TestProjectLoader:
         assert len(ctx["ontology_fields"]) > 0
         assert "text" in ctx["required_item"]
 
-    def test_load_thompson_no_ontology_scope(self):
-        """Template sem ONTOLOGY scope — has_ontology_scope deve ser False."""
+    def test_load_thompson(self):
+        """Thompson: CHAIN + ONTOLOGY scope (o template evoluiu para usar ontologia)."""
         from synesis_coder.project_loader import load_project
 
         ctx = load_project(PROJECT_THOMPSON)
 
-        assert ctx["has_ontology_scope"] is False
+        assert ctx["has_ontology_scope"] is True
+        assert len(ctx["ontology_fields"]) > 0
         assert ctx["project_description"] is None  # thompson não tem DESCRIPTION
 
     def test_load_nave(self):
@@ -128,6 +129,56 @@ class TestProjectLoader:
 
         with pytest.raises(FileNotFoundError):
             load_project(Path("d:/nao_existe/projeto.synp"))
+
+    def test_bib_keys_populated(self):
+        """ctx['bib_keys'] deve expor as chaves do .bib carregado."""
+        from synesis_coder.project_loader import load_project
+
+        ctx = load_project(PROJECT_SOCIAL)
+        assert "bib_keys" in ctx
+        assert len(ctx["bib_keys"]) > 0
+        assert ctx["bib_keys"] == sorted(ctx["bib_keys"])  # ordenadas
+        assert "abdin2024" in ctx["bib_keys"]  # chave real do social_acceptance
+
+
+class TestAssertBibrefKnown:
+    """Testes para assert_bibref_known() — guard de pré-validação (sem LLM)."""
+
+    def test_valid_bibref_passes(self):
+        """Bibref existente no .bib não levanta exceção."""
+        from synesis_coder.project_loader import assert_bibref_known, load_project
+
+        ctx = load_project(PROJECT_SOCIAL)
+        assert_bibref_known(ctx, "abdin2024")  # não deve levantar
+
+    def test_valid_bibref_with_at_prefix_passes(self):
+        """Bibref com '@' à frente é normalizado antes da checagem."""
+        from synesis_coder.project_loader import assert_bibref_known, load_project
+
+        ctx = load_project(PROJECT_SOCIAL)
+        assert_bibref_known(ctx, "@abdin2024")  # não deve levantar
+
+    def test_unknown_bibref_raises_listing_keys(self):
+        """Bibref inexistente levanta ValueError listando chaves disponíveis."""
+        from synesis_coder.project_loader import assert_bibref_known, load_project
+
+        ctx = load_project(PROJECT_SOCIAL)
+        with pytest.raises(ValueError) as exc_info:
+            assert_bibref_known(ctx, "gomez2026")
+
+        msg = str(exc_info.value)
+        assert "gomez2026" in msg
+        assert "abdin2024" in msg  # amostra de chaves disponíveis presente
+
+    def test_empty_bib_keys_raises_clear_message(self):
+        """ctx sem bibliografia produz mensagem específica."""
+        from synesis_coder.project_loader import assert_bibref_known
+
+        ctx = {"bib_keys": [], "project_description": None}
+        with pytest.raises(ValueError) as exc_info:
+            assert_bibref_known(ctx, "smith2024")
+
+        assert "bibliografia" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -205,12 +256,19 @@ class TestPromptBuilder:
         assert text in user_content
 
     def test_prompt_no_ontology_scope(self):
-        """Projeto sem ONTOLOGY scope não deve adicionar seção de ontologia."""
+        """Projeto sem ONTOLOGY scope não deve adicionar seção de ontologia.
+
+        Todos os projetos-caso reais hoje usam ontologia, então derivamos um ctx
+        sem ontology fields a partir de um projeto real para cobrir esse caminho.
+        """
         from synesis_coder.project_loader import load_project
         from synesis_coder.prompt_builder import build_item_prompt
 
         ctx = load_project(PROJECT_THOMPSON)
-        assert ctx["has_ontology_scope"] is False
+        # Simula um template sem ONTOLOGY FIELDS
+        ctx["has_ontology_scope"] = False
+        ctx["ontology_fields"] = {}
+
         # Deve funcionar normalmente mesmo sem ONTOLOGY scope
         messages = build_item_prompt(ctx, "genesis1", "In the beginning...")
         assert len(messages) == 2
@@ -293,6 +351,7 @@ class TestItemModeIntegration:
 
         assert "# synesis-coder item" in result
         assert "# bibref: @genesis1" in result
+        assert "tokens:" in result
 
     @requires_api_key
     def test_item_synesis_init_project(self):

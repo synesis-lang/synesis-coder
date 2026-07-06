@@ -7,17 +7,22 @@ retornado como contexto (ctx).
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import synesis
 from synesis.ast.nodes import FieldType, Scope
 
+logger = logging.getLogger(__name__)
+
 
 def load_project(
     project_path: Path,
     load_annotations: bool = True,
     load_ontology: bool = False,
+    tolerate_annotation_errors: bool = False,
 ) -> dict:
     """Carrega o projeto via synesis.load() e retorna contexto completo.
 
@@ -28,6 +33,10 @@ def load_project(
         load_ontology: Se True, carrega também os arquivos .syno (necessário
             apenas no modo ontology). Padrão False — evita erros em projetos
             cujo .syno usa campos não definidos no template atual.
+        tolerate_annotation_errors: Se True, erros nas anotações .syn existentes
+            são emitidos como warnings em vez de abortar. Erros de template,
+            bibref e sintaxe do .synp continuam abortando. Usar em modos
+            geradores (document) onde o output substituirá as anotações atuais.
 
     Returns:
         dict com chaves:
@@ -46,6 +55,7 @@ def load_project(
             "code_index"          — dict: {"codes", "stats", "empty"}
             "topic_index"         — dict: {"topics", "topic_members", "empty"}
             "ontology_index"      — Dict[str, OntologyNode]
+            "bib_keys"            — List[str]: chaves do .bib (ordenadas)
             "project_description" — Optional[str]: descrição do .synp
             "project_content"     — str
             "template_content"    — str
@@ -92,10 +102,13 @@ def load_project(
     )
 
     if not result.success and result.has_errors():
-        diagnostics = result.get_diagnostics()
-        raise ValueError(
-            f"Erro ao compilar projeto '{project_path.name}':\n{diagnostics}"
-        )
+        if tolerate_annotation_errors:
+            _split_and_tolerate_errors(result, annotation_contents, project_path)
+        else:
+            diagnostics = result.get_diagnostics(verbose=False)
+            raise ValueError(
+                f"Erro ao compilar projeto '{project_path.name}':\n{diagnostics}"
+            )
 
     field_specs = result.template.field_specs
 
@@ -129,12 +142,15 @@ def load_project(
                 }
             break
 
-    # Campos required e bundles do SCOPE ITEM/SOURCE
+    # Campos required e bundles do SCOPE ITEM/SOURCE/ONTOLOGY
     required_item: List[str] = list(
         result.template.required_fields.get(Scope.ITEM, [])
     )
     required_source: List[str] = list(
         result.template.required_fields.get(Scope.SOURCE, [])
+    )
+    required_ontology: List[str] = list(
+        result.template.required_fields.get(Scope.ONTOLOGY, [])
     )
     bundle_pairs: List[Tuple[str, ...]] = list(
         result.template.bundled_fields.get(Scope.ITEM, [])
@@ -145,6 +161,9 @@ def load_project(
     code_index = _build_code_index(linked)
     topic_index = _build_topic_index(linked)
     ontology_index = linked.ontology_index if linked else {}
+
+    # Chaves do .bib já parseado pelo compilador (sem reparse)
+    bib_keys: List[str] = sorted(result.bibliography.keys()) if result.bibliography else []
 
     # Descrição do projeto (já processada pelo compilador)
     project_description: Optional[str] = None
@@ -163,17 +182,77 @@ def load_project(
         "chain_relations": chain_relations,
         "required_item": required_item,
         "required_source": required_source,
+        "required_ontology": required_ontology,
         "bundle_pairs": bundle_pairs,
         "code_index": code_index,
         "topic_index": topic_index,
         "ontology_index": ontology_index,
+        "bib_keys": bib_keys,
         "project_description": project_description,
         "project_content": project_content,
         "template_content": template_content,
         "bib_content": bib_content,
         "annotation_contents": annotation_contents,  # para validação de ITEMs isolados
         "project_path": project_path,
+        "output_language": os.environ.get("SYNESIS_CODER_LANGUAGE", "").strip() or None,
     }
+
+
+def assert_bibref_known(ctx: dict, bibref: str) -> None:
+    """Valida que o bibref informado existe no .bib do projeto; aborta se não.
+
+    Pré-validação com abort precoce (Parte B do plano JSON Assembler): o erro
+    dominante em runs reais é E001 (bibref inexistente), que nenhuma melhoria
+    de formato de saída resolve. Validar aqui evita gastar toda uma execução
+    LLM com um bibref que falharia em todo chunk.
+
+    Não adivinha nem auto-deriva o bibref — apenas valida e aborta com uma
+    mensagem que lista as chaves disponíveis e, quando o .synp traz uma
+    DESCRIPTION, cita-a (a convenção do projeto costuma estar ali).
+
+    Args:
+        ctx: Contexto retornado por load_project() (precisa conter "bib_keys").
+        bibref: Referência informada pelo usuário (com ou sem "@" à frente).
+
+    Raises:
+        ValueError: Se bibref normalizado não estiver entre ctx["bib_keys"].
+    """
+    key = bibref.lstrip("@").strip()
+    bib_keys: List[str] = ctx.get("bib_keys", [])
+
+    if key in bib_keys:
+        return
+
+    if not bib_keys:
+        raise ValueError(
+            f"Bibref '@{key}' não pôde ser validado: o projeto não tem "
+            "bibliografia (.bib) carregada. Verifique a diretiva "
+            "INCLUDE BIBLIOGRAPHY no arquivo .synp."
+        )
+
+    # Amostra das chaves disponíveis (todas se forem poucas)
+    sample = bib_keys if len(bib_keys) <= 20 else bib_keys[:20]
+    sample_str = ", ".join(sample)
+    if len(bib_keys) > 20:
+        sample_str += f", … (+{len(bib_keys) - 20} outras)"
+
+    lines = [
+        f"Bibref '@{key}' não existe na bibliografia do projeto "
+        f"({len(bib_keys)} chave(s) disponível(is)).",
+        f"Chaves disponíveis: {sample_str}",
+    ]
+
+    description = ctx.get("project_description")
+    if description:
+        lines.append(
+            "Convenção do projeto (DESCRIPTION do .synp):\n" + description.strip()
+        )
+
+    lines.append(
+        "Informe um --bibref que corresponda exatamente a uma chave do .bib."
+    )
+
+    raise ValueError("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +367,57 @@ def _build_topic_index(linked) -> dict:
         "topic_members": {t: sorted(members) for t, members in ti.items()},
         "empty": len(ti) == 0,
     }
+
+
+def _split_and_tolerate_errors(result, annotation_contents: dict, project_path: Path) -> None:
+    """Separa erros por origem: aborta em erros de template/projeto; tolera erros de anotação.
+
+    Usado por load_project(tolerate_annotation_errors=True) em modos geradores (document)
+    onde as anotações pré-existentes podem estar desatualizadas em relação ao template.
+
+    Erros cujo location.file aponta para um arquivo de anotação (.syn / .syno) são
+    emitidos como warnings. Qualquer outro erro (template, bibref, .synp) aborta.
+    """
+    annotation_filenames = set(annotation_contents.keys())
+
+    fatal_errors = []
+    tolerated_errors = []
+
+    for err in result.validation_result.errors:
+        loc = getattr(err, "location", None)
+        file_str = str(getattr(loc, "file", "")).replace("\\", "/")
+        file_name = file_str.rsplit("/", 1)[-1] if "/" in file_str else file_str
+        if file_name in annotation_filenames or file_str.endswith(".syn"):
+            tolerated_errors.append(err)
+        else:
+            fatal_errors.append(err)
+
+    if tolerated_errors:
+        # Aggregate errors by message template (strip location prefix) for compact display
+        from collections import Counter
+        counts: Counter = Counter()
+        for e in tolerated_errors:
+            raw = getattr(e, "to_cli_line", lambda: str(e))()
+            # Strip leading location ("arquivo.syn:12: ") to group by message
+            msg = raw.split(": ", 2)[-1] if ": " in raw else raw
+            counts[msg] += 1
+
+        bullet_lines = "\n".join(
+            f"       - {n}x {msg}" for msg, n in counts.most_common()
+        )
+        logger.warning(
+            "Ignorando anotações anteriores (%d erros sob o template atual):\n%s",
+            len(tolerated_errors), bullet_lines,
+        )
+
+    if fatal_errors:
+        from synesis.ast.results import ValidationResult
+        fatal_result = ValidationResult(
+            errors=fatal_errors,
+            warnings=result.validation_result.warnings,
+            info=result.validation_result.info,
+        )
+        diagnostics = fatal_result.to_diagnostics(verbose=False)
+        raise ValueError(
+            f"Erro ao compilar projeto '{project_path.name}':\n{diagnostics}"
+        )

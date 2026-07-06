@@ -36,8 +36,19 @@ semantic_memory_builder.py
 topic_processor.py
 interview_processor.py
 abstract_processor10.py
+# Tool indexes
 .gitnexus
 .claude
-AGENTS.md
+
+# Local docs
 AGENTS.md
 CLAUDE.md
+
+# API tokens / credentials
+*.key
+*_api_token.txt
+*_api_key.txt
+test.bib
+
+# Artefatos gerados manualmente durante testes locais
+test_output/

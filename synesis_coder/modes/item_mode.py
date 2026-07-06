@@ -10,13 +10,15 @@ Fluxo:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Literal
 
+from synesis_coder.block_assembler import assemble_items
 from synesis_coder.llm_client import LLMClient
-from synesis_coder.project_loader import load_project
-from synesis_coder.prompt_builder import build_item_prompt
+from synesis_coder.project_loader import assert_bibref_known, load_project
+from synesis_coder.prompt_builder import build_item_prompt, build_item_values_prompt
+from synesis_coder.runtime_info import runtime_banner
+from synesis_coder.schema_builder import build_item_schema
 from synesis_coder.validator import validate_and_fix
 
 
@@ -43,14 +45,18 @@ def process_item(
     # 1. Carregar contexto do projeto
     ctx = load_project(project_path, load_annotations=True)
 
-    # 2. Construir prompt
-    messages = build_item_prompt(ctx, bibref, text)
+    # 1b. Pré-validar bibref (abort precoce — elimina E001 antes de gastar LLM)
+    assert_bibref_known(ctx, bibref)
 
-    # 3. Chamar LLM
     client = LLMClient(model=model)
-    raw_syn = client.call(messages, temperature=0.0)
+    runtime_banner(client, format=format)
 
-    # 4. Validar e corrigir
+    # 2-3. Caminho JSON (Opção 3): LLM devolve valores → assembler monta o bloco.
+    #      Fallback automático para texto livre quando o backend não suporta
+    #      json_schema ou a resposta não é JSON válido.
+    raw_syn = _generate_item_syn(ctx, bibref, text, client)
+
+    # 4. Validar e corrigir (erros semânticos residuais: SCALE/BUNDLE/ARITY/código)
     final_syn, success = validate_and_fix(raw_syn, ctx, client)
 
     # 5. Formatar saída
@@ -64,6 +70,26 @@ def process_item(
         f"# synesis-coder item\n"
         f"# projeto: {project_name}\n"
         f"# bibref: @{bibref}\n"
+        f"# {client.usage.summary_line()}\n"
         f"{status_line}\n"
     )
     return header + "\n" + final_syn
+
+
+def _generate_item_syn(ctx: dict, bibref: str, text: str, client: LLMClient) -> str:
+    """Gera o texto Synesis de ITEM(s), preferindo o caminho JSON (Opção 3).
+
+    Tenta o caminho JSON: prompt de valores → call_json(schema) → assembler.
+    Cai no caminho de texto livre quando o backend não suporta json_schema ou a
+    resposta não é JSON válido (call_json retorna None).
+    """
+    if client.supports_json_schema():
+        schema = build_item_schema(ctx)
+        messages = build_item_values_prompt(ctx, bibref, text)
+        data = client.call_json(messages, schema, temperature=0.0)
+        if data is not None:
+            return assemble_items(ctx, bibref, data)
+
+    # Fallback: texto livre (comportamento pré-Opção 3)
+    messages = build_item_prompt(ctx, bibref, text)
+    return client.call(messages, temperature=0.0)

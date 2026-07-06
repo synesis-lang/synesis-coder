@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Tuple
 import synesis
 
 if TYPE_CHECKING:
+    from synesis_coder.debug_log import DebugRecorder
     from synesis_coder.llm_client import LLMClient
 
 # Temperature escalation: cada elemento corresponde a uma tentativa de correção
@@ -55,12 +56,25 @@ def validate_and_fix(
     output = _extract_item_blocks(output)
 
     for attempt in range(max_tries + 1):
-        result = synesis.load(
-            project_content=ctx["project_content"],
-            template_content=ctx["template_content"],
-            annotation_contents={annotation_key: output},
-            bibliography_content=ctx.get("bib_content"),
-        )
+        try:
+            result = synesis.load(
+                project_content=ctx["project_content"],
+                template_content=ctx["template_content"],
+                annotation_contents={annotation_key: output},
+                bibliography_content=ctx.get("bib_content"),
+            )
+        except Exception as exc:
+            last_errors = f"Erro de parse: {exc}"
+            if attempt >= max_tries:
+                break
+            temperature = CORRECTION_TEMPERATURES[
+                min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+            ]
+            raw = _strip_markdown_fences(
+                llm_client.fix(output, last_errors, temperature=temperature)
+            )
+            output = _extract_item_blocks(raw) or raw
+            continue
 
         # Considerar válido se não há erros estruturais (ignorando OrphanItem,
         # que é esperado ao validar um ITEM isolado sem o .syn completo do projeto).
@@ -84,6 +98,105 @@ def validate_and_fix(
         output = _extract_item_blocks(raw) or raw
 
     # Todas as tentativas falharam
+    error_header = (
+        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
+        f"# Último diagnóstico:\n"
+    )
+    commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
+    return error_header + commented_errors + "\n\n" + output, False
+
+
+async def validate_and_fix_async(
+    output: str,
+    ctx: dict,
+    llm_client: "LLMClient",
+    annotation_key: str = "output.syn",
+    max_tries: int = 3,
+    recorder: "DebugRecorder | None" = None,
+    context: tuple | None = None,
+) -> Tuple[str, bool]:
+    """Versão assíncrona de validate_and_fix() para modos de lote.
+
+    Valida SOURCE + ITEM blocks via synesis.load(). Se inválido,
+    solicita correção ao LLM usando fix_async().
+
+    Args:
+        output: Texto Synesis gerado pelo LLM (SOURCE + ITEMs).
+        ctx: Contexto do projeto retornado por load_project().
+        llm_client: Cliente LLM para solicitar correções.
+        annotation_key: Nome virtual do arquivo para synesis.load().
+        max_tries: Número máximo de tentativas de correção.
+        recorder: DebugRecorder opcional (flag --debug). None = sem overhead.
+
+    Returns:
+        (output_final, success) — success=False se todas as tentativas falharam.
+    """
+    last_errors = ""
+    output = _strip_markdown_fences(output)
+    extracted = _extract_annotation_blocks(output)
+    if extracted:
+        output = extracted
+
+    for attempt in range(max_tries + 1):
+        try:
+            result = synesis.load(
+                project_content=ctx["project_content"],
+                template_content=ctx["template_content"],
+                annotation_contents={annotation_key: output},
+                bibliography_content=ctx.get("bib_content"),
+            )
+        except Exception as exc:
+            last_errors = f"Erro de parse: {exc}"
+            if recorder is not None:
+                recorder.record_validation(
+                    attempt=attempt, submitted=output, success=False,
+                    diagnostics=[], raw_diagnostic=last_errors, context=context,
+                )
+            if attempt >= max_tries:
+                break
+            temperature = CORRECTION_TEMPERATURES[
+                min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+            ]
+            raw = _strip_markdown_fences(
+                await llm_client.fix_async(
+                    output, last_errors, temperature=temperature, context=context
+                )
+            )
+            extracted = _extract_annotation_blocks(raw)
+            output = extracted or raw
+            continue
+
+        if not _has_structural_errors(result):
+            if recorder is not None:
+                recorder.record_validation(
+                    attempt=attempt, submitted=output, success=True,
+                    diagnostics=[], context=context,
+                )
+            return output, True
+
+        last_errors = result.get_diagnostics()
+        if recorder is not None:
+            from synesis_coder.debug_log import translate_diagnostics
+            recorder.record_validation(
+                attempt=attempt, submitted=output, success=False,
+                diagnostics=translate_diagnostics(result), raw_diagnostic=last_errors,
+                context=context,
+            )
+
+        if attempt >= max_tries:
+            break
+
+        temperature = CORRECTION_TEMPERATURES[
+            min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+        ]
+        raw = _strip_markdown_fences(
+            await llm_client.fix_async(
+                output, last_errors, temperature=temperature, context=context
+            )
+        )
+        extracted = _extract_annotation_blocks(raw)
+        output = extracted or raw
+
     error_header = (
         f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
         f"# Último diagnóstico:\n"
@@ -129,6 +242,179 @@ def _extract_item_blocks(text: str) -> str:
 
     pattern = re.compile(
         r"^ITEM\s+@\S+.*?^END ITEM",
+        re.MULTILINE | re.DOTALL,
+    )
+    blocks = pattern.findall(text)
+    if not blocks:
+        return ""
+    return "\n\n".join(block.strip() for block in blocks)
+
+
+def _extract_annotation_blocks(text: str) -> str:
+    """Extrai blocos SOURCE e ITEM do output do LLM para o modo abstract.
+
+    Preserva SOURCE...END SOURCE e ITEM...END ITEM, descartando
+    ONTOLOGY, PROJECT, TEMPLATE ou qualquer outro tipo de bloco.
+
+    Retorna string com os blocos concatenados, ou string vazia se nenhum
+    bloco for encontrado.
+    """
+    import re
+
+    pattern = re.compile(
+        r"^(?:SOURCE|ITEM)\s+@\S+.*?^END (?:SOURCE|ITEM)",
+        re.MULTILINE | re.DOTALL,
+    )
+    blocks = pattern.findall(text)
+    if not blocks:
+        return ""
+    return "\n\n".join(block.strip() for block in blocks)
+
+
+def validate_ontology_entry(
+    output: str,
+    ctx: dict,
+    llm_client: "LLMClient",
+    ontology_key: str = "output.syno",
+    max_tries: int = 3,
+) -> Tuple[str, bool]:
+    """Valida uma entrada ONTOLOGY via synesis.load(). Se inválida, solicita correção.
+
+    Valida o .syno gerado carregando-o junto com as anotações existentes
+    do projeto para que o compilador possa resolver referências a códigos.
+
+    Args:
+        output: Texto Synesis com o bloco ONTOLOGY gerado pelo LLM.
+        ctx: Contexto do projeto retornado por load_project().
+        llm_client: Cliente LLM para solicitar correções.
+        ontology_key: Nome virtual do arquivo .syno para synesis.load().
+        max_tries: Número máximo de tentativas de correção (padrão: 3).
+
+    Returns:
+        (output_final, success) — success=False se todas as tentativas falharam.
+    """
+    last_errors = ""
+    output = _strip_markdown_fences(output)
+    extracted = _extract_ontology_blocks(output)
+    if extracted:
+        output = extracted
+
+    for attempt in range(max_tries + 1):
+        try:
+            result = synesis.load(
+                project_content=ctx["project_content"],
+                template_content=ctx["template_content"],
+                annotation_contents=ctx.get("annotation_contents") or None,
+                ontology_contents={ontology_key: output},
+                bibliography_content=ctx.get("bib_content"),
+            )
+        except Exception as exc:
+            last_errors = f"Erro de parse: {exc}"
+            if attempt >= max_tries:
+                break
+            temperature = CORRECTION_TEMPERATURES[
+                min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+            ]
+            raw = _strip_markdown_fences(
+                llm_client.fix(output, last_errors, temperature=temperature)
+            )
+            extracted = _extract_ontology_blocks(raw)
+            output = extracted or raw
+            continue
+
+        if not _has_structural_errors(result):
+            return output, True
+
+        last_errors = result.get_diagnostics()
+
+        if attempt >= max_tries:
+            break
+
+        temperature = CORRECTION_TEMPERATURES[
+            min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+        ]
+        raw = _strip_markdown_fences(
+            llm_client.fix(output, last_errors, temperature=temperature)
+        )
+        extracted = _extract_ontology_blocks(raw)
+        output = extracted or raw
+
+    error_header = (
+        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
+        f"# Último diagnóstico:\n"
+    )
+    commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
+    return error_header + commented_errors + "\n\n" + output, False
+
+
+async def validate_ontology_entry_async(
+    output: str,
+    ctx: dict,
+    llm_client: "LLMClient",
+    ontology_key: str = "output.syno",
+    max_tries: int = 3,
+) -> Tuple[str, bool]:
+    """Versão assíncrona de validate_ontology_entry()."""
+    last_errors = ""
+    output = _strip_markdown_fences(output)
+    extracted = _extract_ontology_blocks(output)
+    if extracted:
+        output = extracted
+
+    for attempt in range(max_tries + 1):
+        try:
+            result = synesis.load(
+                project_content=ctx["project_content"],
+                template_content=ctx["template_content"],
+                annotation_contents=ctx.get("annotation_contents") or None,
+                ontology_contents={ontology_key: output},
+                bibliography_content=ctx.get("bib_content"),
+            )
+        except Exception as exc:
+            last_errors = f"Erro de parse: {exc}"
+            if attempt >= max_tries:
+                break
+            temperature = CORRECTION_TEMPERATURES[
+                min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+            ]
+            raw = _strip_markdown_fences(
+                await llm_client.fix_async(output, last_errors, temperature=temperature)
+            )
+            extracted = _extract_ontology_blocks(raw)
+            output = extracted or raw
+            continue
+
+        if not _has_structural_errors(result):
+            return output, True
+
+        last_errors = result.get_diagnostics()
+
+        if attempt >= max_tries:
+            break
+
+        temperature = CORRECTION_TEMPERATURES[
+            min(attempt, len(CORRECTION_TEMPERATURES) - 1)
+        ]
+        raw = _strip_markdown_fences(
+            await llm_client.fix_async(output, last_errors, temperature=temperature)
+        )
+        extracted = _extract_ontology_blocks(raw)
+        output = extracted or raw
+
+    error_header = (
+        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
+        f"# Último diagnóstico:\n"
+    )
+    commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
+    return error_header + commented_errors + "\n\n" + output, False
+
+
+def _extract_ontology_blocks(text: str) -> str:
+    """Extrai apenas os blocos ONTOLOGY...END ONTOLOGY do output do LLM."""
+    import re
+
+    pattern = re.compile(
+        r"^ONTOLOGY\s+\S+.*?^END ONTOLOGY",
         re.MULTILINE | re.DOTALL,
     )
     blocks = pattern.findall(text)

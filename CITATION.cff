@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Synesis: A DSL compiler for knowledge engineering"
+abstract: >
+  synesis-coder is the LLM-assisted annotation component of the Synesis ecosystem.
+  It provides CLI modes for item extraction, document processing, abstract batch
+  annotation, ontology generation, and ACT pipeline phases (critique, normalize,
+  incorporate, finetune). Supports Anthropic and OpenAI-compatible backends with
+  deterministic JSON assembly and free-text fallback paths.
+authors:
+  - family-names: De Britto
+    given-names: Christian Maciel
+    orcid: "https://orcid.org/0000-0003-1431-3924"
+version: "0.6.1"
+date-released: "2026-06-16"
+license: MIT
+repository-code: "https://github.com/synesis-lang/synesis-coder"
+url: "https://synesis-lang.github.io/synesis-docs"
+keywords:
+  - qualitative-research
+  - knowledge-engineering
+  - llm
+  - annotation
+  - ontology
+  - research-tools
+  - synesis
