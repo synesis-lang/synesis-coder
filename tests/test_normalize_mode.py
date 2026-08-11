@@ -36,7 +36,6 @@ from synesis_coder.modes.normalize_mode import (
 )
 from synesis_coder.synr_io import SynrDocument, parse_synr
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

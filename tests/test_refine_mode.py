@@ -288,7 +288,7 @@ class TestRefineLoop:
     def test_improves_when_score_drops(self):
         """Score inicial alto; re-extração baixa o score → aceita nova versão."""
         # baseline 0.62; critique dentro do loop 0.62; candidato pontua 0.10
-        critic = _FakeClient(critique_scores=[0.62, 0.62, 0.10], reextractions=[])
+        critic = _FakeClient(critique_scores=[0.62, 0.10], reextractions=[])
         gen = _FakeClient(critique_scores=[], reextractions=[_ITEM_A_FIXED])
         with patch.object(refine_mode, "validate_and_fix_async", _passthrough_validate):
             res = _run(_refine_single_item(
@@ -302,7 +302,7 @@ class TestRefineLoop:
     def test_non_regression_rejects_worse_candidate(self):
         """Candidato com score >= atual é rejeitado; original preservado."""
         # baseline 0.62; critique loop 0.62; candidato pontua 0.70 (pior)
-        critic = _FakeClient(critique_scores=[0.62, 0.62, 0.70], reextractions=[])
+        critic = _FakeClient(critique_scores=[0.62, 0.70], reextractions=[])
         gen = _FakeClient(critique_scores=[], reextractions=[_ITEM_A_FIXED])
         with patch.object(refine_mode, "validate_and_fix_async", _passthrough_validate):
             res = _run(_refine_single_item(
@@ -315,7 +315,7 @@ class TestRefineLoop:
 
     def test_invalid_candidate_rejected(self):
         """validate_and_fix_async falha → mantém a melhor versão anterior."""
-        critic = _FakeClient(critique_scores=[0.62, 0.62], reextractions=[])
+        critic = _FakeClient(critique_scores=[0.62], reextractions=[])
         gen = _FakeClient(critique_scores=[], reextractions=[_ITEM_A_FIXED])
         with patch.object(refine_mode, "validate_and_fix_async", _reject_validate):
             res = _run(_refine_single_item(
@@ -327,7 +327,7 @@ class TestRefineLoop:
 
     def test_fixed_point_stops(self):
         """Re-extração devolve bloco idêntico ao anterior → para (ponto-fixo)."""
-        critic = _FakeClient(critique_scores=[0.62, 0.62], reextractions=[])
+        critic = _FakeClient(critique_scores=[0.62], reextractions=[])
         # gerador devolve o MESMO bloco de entrada
         gen = _FakeClient(critique_scores=[], reextractions=[_ITEM_A])
         with patch.object(refine_mode, "validate_and_fix_async", _passthrough_validate):
@@ -341,7 +341,7 @@ class TestRefineLoop:
         """max_iter=1 executa no máximo uma re-extração."""
         # Se não parasse, consumiria mais scores. Fornecemos scores decrescentes
         # p/ garantir que só 1 iteração roda apesar de o score continuar alto.
-        critic = _FakeClient(critique_scores=[0.80, 0.80, 0.60], reextractions=[])
+        critic = _FakeClient(critique_scores=[0.80, 0.60], reextractions=[])
         gen = _FakeClient(critique_scores=[], reextractions=[_ITEM_A_FIXED, _ITEM_A])
         with patch.object(refine_mode, "validate_and_fix_async", _passthrough_validate):
             res = _run(_refine_single_item(

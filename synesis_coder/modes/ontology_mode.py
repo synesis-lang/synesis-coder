@@ -24,10 +24,15 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from synesis_coder.block_assembler import assemble_ontology
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.project_loader import load_project
-from synesis_coder.prompt_builder import build_ontology_prompt
-from synesis_coder.runtime_info import runtime_banner
+from synesis_coder.prompt_builder import (
+    build_ontology_prompt,
+    build_ontology_values_prompt,
+)
+from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
+from synesis_coder.schema_builder import build_ontology_schema
 from synesis_coder.synr_io import safe_write_output
 from synesis_coder.validator import validate_ontology_entry_async
 
@@ -116,6 +121,16 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
     }
 
 
+# Cabeçalho que separa as entradas anexadas por `--update` do conteúdo
+# preexistente, para que a origem de cada bloco continue legível no arquivo.
+_UPDATE_SECTION_HEADER = (
+    "# ---------------------------------------------------------------------------\n"
+    "# Entradas acrescentadas por `synesis-coder ontology --update` ({count} novas).\n"
+    "# O conteúdo acima foi preservado na íntegra.\n"
+    "# ---------------------------------------------------------------------------"
+)
+
+
 # ---------------------------------------------------------------------------
 # Derivar códigos pendentes
 # ---------------------------------------------------------------------------
@@ -156,6 +171,33 @@ def _get_pending_codes(ctx: dict, update: bool) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
+async def _generate_ontology_syno(
+    code: str,
+    ctx: dict,
+    semantic_ctx: dict,
+    llm_client: LLMClient,
+) -> str:
+    """Gera o texto Synesis de uma entrada ONTOLOGY, preferindo o caminho JSON.
+
+    Caminho JSON (Opção 3): o LLM devolve apenas os VALORES conforme JSON Schema
+    → o assembler monta o bloco `ONTOLOGY <code> ... END ONTOLOGY`. Cai para o
+    caminho de texto livre quando o backend não suporta json_schema ou a resposta
+    não é JSON válido. No caminho JSON, o LLM nunca digita a moldura do bloco —
+    a linha alucinada `ITEM <code> TYPE variable` que corrompia o .syno torna-se
+    impossível (chaves fora de ONTOLOGY FIELDS são barradas por schema/assembler).
+    """
+    if llm_client.supports_json_schema():
+        topics = ctx.get("topic_index", {}).get("topics", [])
+        schema = build_ontology_schema(ctx, topics=topics)
+        messages = build_ontology_values_prompt(ctx, code, semantic_ctx)
+        data = await llm_client.call_json_async(messages, schema, temperature=0.0)
+        if isinstance(data, dict):
+            return assemble_ontology(ctx, code, data)
+
+    messages = build_ontology_prompt(ctx, code, semantic_ctx)
+    return await llm_client.call_async(messages, temperature=0.0)
+
+
 async def _process_one_code(
     code: str,
     ctx: dict,
@@ -177,10 +219,11 @@ async def _process_one_code(
         logger.info("Processando código: %s", code)
 
         semantic_ctx = _build_semantic_ctx(code, ctx)
-        messages = build_ontology_prompt(ctx, code, semantic_ctx)
 
         try:
-            raw_syno = await llm_client.call_async(messages, temperature=0.0)
+            raw_syno = await _generate_ontology_syno(
+                code, ctx, semantic_ctx, llm_client
+            )
         except Exception as exc:
             logger.error("Falha na chamada LLM para '%s': %s", code, exc)
             error_output = (
@@ -216,6 +259,7 @@ def process_ontology(
     format: str = "plain",
     overwrite: bool = False,
     backup: bool = False,
+    prompt_only: bool = False,
 ) -> str:
     """Gera entradas ONTOLOGY (.syno) a partir do corpus anotado do projeto.
 
@@ -228,15 +272,37 @@ def process_ontology(
         format: "plain" ou "verbose".
         overwrite: Se True, sobrescreve output existente sem confirmação.
         backup: Se True, cria backup (.syno.bak) antes de gravar.
+        prompt_only: Se True, retorna o prompt montado em Markdown e não chama
+            o LLM (nenhum arquivo é escrito).
 
     Returns:
-        String com resumo da execução.
+        String com resumo da execução, ou o prompt em Markdown quando
+        prompt_only=True.
 
     Raises:
         FileNotFoundError: Se o projeto não for encontrado.
         ValueError: Se o template não tiver ONTOLOGY scope, ou se não houver
             códigos anotados no projeto.
     """
+    if prompt_only:
+        from synesis_coder.prompt_dump import dump_prompt
+
+        # Anotações desatualizadas em relação ao template não impedem a
+        # inspeção do prompt — ver nota em abstract_mode.process_abstract.
+        # O .syno é dispensado aqui (load_ontology=False): o prompt de ontology
+        # deriva do template e do corpus .syn, e uma ontologia escrita sob um
+        # template anterior abortaria a carga sem nada a acrescentar ao dump.
+        ctx = load_project(
+            project_path, load_annotations=True, load_ontology=False,
+            tolerate_annotation_errors=True,
+        )
+        # Usa o primeiro código do corpus quando houver — o user message de
+        # ontology deriva do corpus, não de um arquivo de entrada.
+        codes = ctx.get("code_index", {}).get("codes", [])
+        return dump_prompt(
+            ctx, mode="ontology", text=codes[0] if codes else None
+        )
+
     return asyncio.run(
         _process_ontology_async(
             project_path, output_path, update, concurrent, model, format,
@@ -314,20 +380,26 @@ async def _process_ontology_async(
     processed = 0
     total_ok = 0
     total_fail = 0
-    results: List[Tuple[str, str]] = []  # (code, syno_output)
+    results: List[Tuple[str, str]] = []  # (code, syno_output) — apenas válidos
+    rejected: List[Tuple[str, str]] = []  # (code, syno_output) — falharam validação
 
     for coro in asyncio.as_completed(tasks):
         code, syno_output, success = await coro
-        results.append((code, syno_output))
         processed += 1
         if success:
             total_ok += 1
+            results.append((code, syno_output))
         else:
             total_fail += 1
+            rejected.append((code, syno_output))
         status = "OK" if success else "FALHA"
         logger.info("[%d/%d] %s: %s", processed, total, code, status)
 
-    # 7. Combinar entradas e gravar .syno
+    # 7. Combinar entradas VÁLIDAS e gravar .syno
+    # Blocos que falharam a validação (com `# ERRO: validação falhou` e texto
+    # possivelmente malformado) NÃO entram no .syno — gravá-los corromperia o
+    # arquivo para qualquer `compile`/`load` posterior. Vão para um arquivo
+    # `.rejeitados` separado, preservando o diagnóstico sem quebrar o .syno.
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -335,8 +407,25 @@ async def _process_ontology_async(
     results.sort(key=lambda x: x[0])
     combined = "\n\n".join(syno for _, syno in results)
 
+    # Em modo --update, os códigos JÁ definidos foram deliberadamente pulados
+    # em _get_pending_codes(): eles não estão em `results`. Gravar apenas
+    # `results` apagaria justamente as entradas preservadas — inclusive
+    # definições curadas à mão. O conteúdo existente é, portanto, preservado
+    # na íntegra e as novas entradas são ANEXADAS ao final.
+    if update and output_path.is_file():
+        existing = output_path.read_text(encoding="utf-8").rstrip("\n")
+        if existing:
+            combined = (
+                existing
+                + "\n\n"
+                + _UPDATE_SECTION_HEADER.format(count=len(results))
+                + "\n\n"
+                + combined
+            )
+
     # Escrita atômica com proteção de sobrescrita e backup opcional
-    # Em modo --update o arquivo já existe e é intencionalmente sobrescrito
+    # Em modo --update o arquivo já existe e é reescrito (conteúdo anterior
+    # preservado acima); fora dele, --overwrite é exigido para substituir.
     safe_write_output(
         output_path, combined + "\n",
         overwrite=update or overwrite,
@@ -344,8 +433,25 @@ async def _process_ontology_async(
     )
     logger.info("Escrito: %s", output_path)
 
+    if rejected:
+        rejected.sort(key=lambda x: x[0])
+        rejected_path = output_path.with_suffix(output_path.suffix + ".rejeitados")
+        rejected_text = "\n\n".join(syno for _, syno in rejected)
+        safe_write_output(
+            rejected_path, rejected_text + "\n", overwrite=True, backup=False,
+        )
+        logger.warning(
+            "%d bloco(s) falharam validação e foram gravados em %s "
+            "(NÃO incluídos no .syno para não corrompê-lo)",
+            len(rejected), rejected_path,
+        )
+
     elapsed = time.monotonic() - start_time
     rate = (total_ok / total * 100) if total > 0 else 0
+
+    # Degradação silenciosa: entradas que caíram para texto livre rodaram sem
+    # as restrições do schema (enum de topic, additionalProperties).
+    warn_schema_fallbacks(llm_client)
 
     summary = (
         f"Processamento concluído em {elapsed:.1f}s\n"

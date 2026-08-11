@@ -9,7 +9,6 @@ ser executados sem credenciais.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,11 +31,13 @@ PROJECT_AIDS = CASES_DIR / "Sociology/iramuteq_aids_corpus/aids_corpus.synp"
 PROJECT_NAVE = CASES_DIR / "Theology/Nave_Topical_Concordance/nave.synp"
 PROJECT_THOMPSON = CASES_DIR / "Theology/Thompson_Chain_Reference/thompson_bible.synp"
 
-HAS_API_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-requires_api_key = pytest.mark.skipif(
-    not HAS_API_KEY, reason="ANTHROPIC_API_KEY não disponível"
-)
+# `integration` marca chamada real de API — deselecionado por padrão via
+# addopts em pyproject.toml (`-m 'not integration'`).
+#
+# A ausência de credencial é tratada em `tests/conftest.py`, não aqui: um
+# `skipif` neste ponto seria avaliado no import, logo após `load_dotenv()`,
+# e portanto NUNCA dispararia em máquina com `.env` — era inerte.
+requires_api_key = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +171,27 @@ class TestAssertBibrefKnown:
         assert "gomez2026" in msg
         assert "abdin2024" in msg  # amostra de chaves disponíveis presente
 
-    def test_empty_bib_keys_raises_clear_message(self):
-        """ctx sem bibliografia produz mensagem específica."""
+    def test_no_bibliography_directive_passes(self):
+        """Projeto sem INCLUDE BIBLIOGRAPHY (synesis core >= 0.6.0): SOURCE é
+        definido só pelo template, bibref não precisa validar contra .bib."""
         from synesis_coder.project_loader import assert_bibref_known
 
-        ctx = {"bib_keys": [], "project_description": None}
+        ctx = {
+            "bib_keys": [],
+            "project_description": None,
+            "project_content": 'PROJECT lattes\nTEMPLATE "lattes.synt"\nEND PROJECT',
+        }
+        assert_bibref_known(ctx, "lattes-3474555741700167")  # não deve levantar
+
+    def test_bibliography_directive_with_empty_bib_raises_clear_message(self):
+        """INCLUDE BIBLIOGRAPHY presente mas .bib sem chaves produz mensagem específica."""
+        from synesis_coder.project_loader import assert_bibref_known
+
+        ctx = {
+            "bib_keys": [],
+            "project_description": None,
+            "project_content": 'PROJECT x\nTEMPLATE "x.synt"\nINCLUDE BIBLIOGRAPHY "x.bib"\nEND PROJECT',
+        }
         with pytest.raises(ValueError) as exc_info:
             assert_bibref_known(ctx, "smith2024")
 

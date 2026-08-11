@@ -15,7 +15,7 @@ Hierarquia de instruções por campo:
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from synesis.ast.nodes import FieldSpec, FieldType
 
@@ -298,11 +298,32 @@ def _build_item_fields_section(ctx: dict) -> str:
 
 
 def _field_instruction(
-    name: str, spec: FieldSpec, chain_relations: dict
+    name: str, spec: FieldSpec, chain_relations: dict,
+    fallback: Optional[str] = None,
 ) -> str:
-    """Gera instrução para um campo com base em guidelines, description e tipo."""
-    # Instrução principal: guidelines > description > genérica por tipo
-    base = spec.guidelines or spec.description or _generic_instruction(spec.type)
+    """Gera instrução para um campo com base em guidelines, description e tipo.
+
+    Args:
+        name: Nome do campo no template.
+        spec: FieldSpec do campo.
+        chain_relations: Relações do campo CHAIN do template.
+        fallback: Instrução a usar quando o campo não declara guidelines nem
+            description. None usa a genérica por TIPO. O escopo SOURCE passa
+            aqui a sua genérica por NOME (`_generic_source_instruction`), que
+            é mais específica para campos de metadado documental.
+
+    Returns:
+        A instrução, acrescida dos valores/relações/faixa derivados do tipo —
+        é este acréscimo que entrega ao modelo a lista fechada de um
+        ENUMERATED/ORDERED, as RELATIONS de um CHAIN e a faixa de um SCALE.
+    """
+    # Instrução principal: guidelines > description > genérica (por nome ou tipo)
+    base = (
+        spec.guidelines
+        or spec.description
+        or fallback
+        or _generic_instruction(spec.type)
+    )
 
     extras: List[str] = []
 
@@ -534,9 +555,23 @@ def _build_abstract_system_prompt(ctx: dict) -> str:
 
 
 def _build_source_fields_section(ctx: dict) -> str:
-    """Gera a seção de instruções por campo SOURCE do template."""
+    """Gera a seção de instruções por campo SOURCE do template.
+
+    Usa `_field_instruction` — a mesma função dos escopos ITEM e ONTOLOGY — para
+    que um campo SOURCE receba, além da sua GUIDELINE, os valores/relações/faixa
+    derivados do tipo. Sem isso um ENUMERATED em SOURCE chegava ao modelo sem a
+    lista de valores permitidos: no caminho JSON o `enum` do schema ainda
+    restringia a saída, mas no caminho de TEXTO LIVRE (fallback) não havia
+    defesa alguma, e uma GUIDELINE como "escolha exatamente uma das opções
+    acima" referenciava uma lista que nunca fora enviada.
+
+    O fallback por NOME do escopo SOURCE (`_generic_source_instruction`) é
+    preservado e passado explicitamente: ele é mais específico que o genérico
+    por tipo para campos de metadado documental (description, method).
+    """
     source_fields: dict = ctx["source_fields"]
     required_source: list = ctx.get("required_source", [])
+    chain_relations: dict = ctx.get("chain_relations", {})
 
     if not source_fields:
         return ""
@@ -544,8 +579,17 @@ def _build_source_fields_section(ctx: dict) -> str:
     lines = ["SOURCE FIELDS (generate all REQUIRED fields; OPTIONAL only when relevant):"]
 
     for name, spec in source_fields.items():
+        # Campos com origem-de-valor externa (ON BIBLIOGRAPHY / ON DATASET) NÃO
+        # são gerados pelo LLM — o compilador os resolve do .bib/TOML. Pedi-los
+        # ao modelo desperdiça tokens e induz valores fabricados (ex.: `false`
+        # para um campo TOML vazio). Omitidos do prompt.
+        if getattr(spec, "value_origin", "document") in ("bibliography", "dataset"):
+            continue
         req_label = "REQUIRED" if name in required_source else "OPTIONAL"
-        instruction = spec.guidelines or spec.description or _generic_source_instruction(name)
+        instruction = _field_instruction(
+            name, spec, chain_relations,
+            fallback=_generic_source_instruction(name),
+        )
         lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
         lines.append(f"    {instruction}")
 
@@ -814,6 +858,64 @@ def build_ontology_prompt(
         {"role": "system", "content": system_text, "cache": True},
         {"role": "user", "content": user_text, "cache": False},
     ]
+
+
+def build_ontology_values_prompt(
+    ctx: dict,
+    code: str,
+    semantic_ctx: dict,
+) -> List[dict]:
+    """Prompt para o caminho JSON do modo ontology (valores de um ONTOLOGY).
+
+    Análogo a build_ontology_prompt, mas solicita apenas um objeto JSON com os
+    VALORES dos campos ONTOLOGY — o assembler monta a moldura `ONTOLOGY <code>
+    ... END ONTOLOGY`. Reutiliza a mesma mensagem de usuário rica em
+    semantic_ctx; só o system prompt (contrato de saída) difere.
+    """
+    system_text = _build_ontology_values_system_prompt(ctx)
+    user_text = _build_ontology_user_message(code, semantic_ctx, ctx)
+
+    return [
+        {"role": "system", "content": system_text, "cache": True},
+        {"role": "user", "content": user_text, "cache": False},
+    ]
+
+
+def _build_ontology_values_system_prompt(ctx: dict) -> str:
+    """System prompt para o caminho JSON do modo ontology."""
+    parts: List[str] = []
+
+    parts.append(
+        "You are an expert in qualitative analysis and domain ontology.\n"
+        "Generate the structured VALUES of a Synesis ONTOLOGY entry for an "
+        "analytical code, based on the semantic context derived from the "
+        "already annotated corpus.\n\n"
+        "OUTPUT CONTRACT:\n"
+        "- Return ONLY a JSON object with the ONTOLOGY field values\n"
+        "- Provide values only — do NOT write Synesis block keywords "
+        "(ONTOLOGY, END ONTOLOGY, ITEM, TYPE), field names with colons, or "
+        "indentation. The system assembles the block.\n"
+        "- Omit OPTIONAL fields you have no content for; include all REQUIRED fields"
+    )
+
+    lang = ctx.get("output_language")
+    if lang:
+        parts.append(
+            f"OUTPUT LANGUAGE: All free-text values (TEXT) must be written in {lang}."
+        )
+
+    if ctx.get("project_description"):
+        parts.append("PROJECT CONTEXT:\n" + ctx["project_description"])
+
+    ontology_fields_section = _build_ontology_fields_section(ctx)
+    if ontology_fields_section:
+        parts.append(ontology_fields_section)
+
+    topic_section = _build_topic_index_section(ctx["topic_index"])
+    if topic_section:
+        parts.append(topic_section)
+
+    return "\n\n".join(parts)
 
 
 def _build_ontology_system_prompt(ctx: dict) -> str:

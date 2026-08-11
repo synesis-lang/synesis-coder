@@ -23,7 +23,7 @@ from synesis_coder.modes.critique_mode import (
     process_critique,
 )
 from synesis_coder.prompt_builder import build_critique_prompt
-from synesis_coder.synr_io import parse_synr, write_synr, create_synr
+from synesis_coder.synr_io import create_synr, parse_synr, write_synr
 
 # ---------------------------------------------------------------------------
 # Constantes e fixtures
@@ -456,6 +456,7 @@ class TestCritiqueOutputCompiles:
         """O .synr gerado pelo critique compila via synesis.load() sem erros."""
         try:
             import synesis
+
             from synesis_coder.project_loader import load_project
             from synesis_coder.validator import _has_structural_errors
         except ImportError:

@@ -10,6 +10,7 @@ determinístico quando temperature=0:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Tuple
 
 import synesis
@@ -18,8 +19,113 @@ if TYPE_CHECKING:
     from synesis_coder.debug_log import DebugRecorder
     from synesis_coder.llm_client import LLMClient
 
+_log = logging.getLogger(__name__)
+
 # Temperature escalation: cada elemento corresponde a uma tentativa de correção
 CORRECTION_TEMPERATURES = [0.0, 0.2, 0.5]
+
+_FIX_REJECTED_MSG = (
+    "Correção rejeitada: o LLM devolveu MENOS blocos do que recebeu "
+    "(truncagem). Mantendo a versão anterior e seguindo para a próxima "
+    "tentativa."
+)
+
+
+def _fix_system_prompt(ctx: dict, scope: str) -> str | None:
+    """Reconstrói o system prompt da geração para reenviar na correção.
+
+    Sem isso, a chamada de correção vai à API sem as GUIDELINES do template
+    (réguas de score, proibições de domínio, code_index) — o modelo corrige
+    enxergando apenas o diagnóstico estrutural do compilador, e o resultado
+    degrada a cada iteração do laço.
+
+    O texto é reconstruído a partir do mesmo `ctx` usado na geração, e
+    `_build_*_system_prompt` é determinístico (sem timestamp/uuid/set), de modo
+    que o prefixo casa byte-a-byte com o cache já gravado — o reenvio custa
+    ~0.1x em vez de 1.0x.
+
+    Args:
+        ctx: Contexto do projeto (o mesmo passado à geração).
+        scope: "item" para blocos ITEM isolados (modos item/document/refine);
+            "abstract" para SOURCE + ITEMs (modos abstract/dataset);
+            "ontology" para entradas ONTOLOGY (modo ontology).
+
+    Returns:
+        O system prompt, ou None se não for possível reconstruí-lo (nesse caso
+        a correção mantém o comportamento antigo, sem contexto).
+    """
+    try:
+        from synesis_coder.prompt_builder import (
+            _build_abstract_system_prompt,
+            _build_ontology_system_prompt,
+            _build_system_prompt,
+        )
+
+        if scope == "abstract":
+            return _build_abstract_system_prompt(ctx)
+        if scope == "ontology":
+            return _build_ontology_system_prompt(ctx)
+        return _build_system_prompt(ctx)
+    except Exception:  # pragma: no cover - degradação graciosa
+        # Falha ao remontar não pode derrubar a validação: sem system o fix
+        # volta ao comportamento anterior (cego), que ainda funciona.
+        return None
+
+
+def _count_blocks(text: str) -> tuple[int, int, int]:
+    """Conta blocos ITEM, SOURCE e ONTOLOGY. Determinístico, sem IO."""
+    import re
+
+    return (
+        len(re.findall(r"^\s*ITEM\b", text, re.MULTILINE)),
+        len(re.findall(r"^\s*SOURCE\b", text, re.MULTILINE)),
+        len(re.findall(r"^\s*ONTOLOGY\b", text, re.MULTILINE)),
+    )
+
+
+def _accept_fix(previous: str, candidate: str) -> tuple[str, bool]:
+    """Rejeita uma correção que PERDE blocos em vez de consertá-los.
+
+    O loop de correção já produziu truncagem em produção: um caso documentado
+    passou de 19 ITEMs para 1, com perda do bloco SOURCE. Como a saída ainda é
+    sintaticamente válida, nada no pipeline detectava a perda — o `.syn` era
+    gravado silenciosamente mutilado.
+
+    A guarda é deliberadamente conservadora: só rejeita PERDA (menos blocos de
+    um tipo que já existia). Correções que mantêm ou aumentam a contagem
+    passam, porque dividir um bloco malformado em dois é resultado legítimo.
+
+    Returns:
+        (texto_a_usar, aceito) — quando rejeitado, devolve `previous` intacto.
+    """
+    if not candidate.strip():
+        return previous, False
+
+    for prev_n, cand_n in zip(_count_blocks(previous), _count_blocks(candidate)):
+        if prev_n and cand_n < prev_n:
+            return previous, False
+    return candidate, True
+
+
+# NOTA — por que o validator NÃO passa `schema=` ao fix
+#
+# `fix()`/`fix_async()` aceitam `schema=`, mas este módulo deliberadamente não
+# o usa. O motivo é um descasamento de formato, não um esquecimento:
+#
+#   - Com schema, o modelo devolve JSON de VALORES ({"items": [...]}), que só
+#     vira bloco Synesis depois de passar pelo `block_assembler`.
+#   - O laço abaixo trata o retorno do fix como TEXTO Synesis: aplica
+#     `_extract_item_blocks`/`_extract_annotation_blocks` e entrega direto a
+#     `synesis.load()`.
+#
+# Passar o schema aqui faria `_extract_*` devolver string vazia e o JSON cru
+# seguir para o compilador, que falharia em toda tentativa — trocando uma
+# correção degradada por uma correção impossível.
+#
+# Fechar o defeito irmão (fix perde as garantias estruturais do schema) exige
+# montar um caminho JSON completo para a correção: prompt de valores + envio do
+# schema + `block_assembler` no retorno. É mudança de escopo maior, fora desta
+# correção. Ver Planning/Estudo_Fix_Perde_System_Prompt.md §6.2.
 
 
 def validate_and_fix(
@@ -28,6 +134,7 @@ def validate_and_fix(
     llm_client: "LLMClient",
     annotation_key: str = "output.syn",
     max_tries: int = 3,
+    scope: str = "item",
 ) -> Tuple[str, bool]:
     """Valida output via synesis.load(). Se inválido, solicita correção ao LLM.
 
@@ -47,11 +154,14 @@ def validate_and_fix(
         llm_client: Cliente LLM para solicitar correções.
         annotation_key: Nome virtual do arquivo para synesis.load().
         max_tries: Número máximo de tentativas de correção (padrão: 3).
+        scope: "item" (blocos ITEM) ou "abstract" (SOURCE + ITEMs) — determina
+            qual system prompt é reenviado nas correções.
 
     Returns:
         (output_final, success) — success=False se todas as tentativas falharam.
     """
     last_errors = ""
+    fix_system = _fix_system_prompt(ctx, scope)
     output = _strip_markdown_fences(output)
     output = _extract_item_blocks(output)
 
@@ -62,6 +172,7 @@ def validate_and_fix(
                 template_content=ctx["template_content"],
                 annotation_contents={annotation_key: output},
                 bibliography_content=ctx.get("bib_content"),
+                dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
@@ -71,9 +182,14 @@ def validate_and_fix(
                 min(attempt, len(CORRECTION_TEMPERATURES) - 1)
             ]
             raw = _strip_markdown_fences(
-                llm_client.fix(output, last_errors, temperature=temperature)
+                llm_client.fix(
+                    output, last_errors, temperature=temperature, system=fix_system,
+                )
             )
-            output = _extract_item_blocks(raw) or raw
+            candidate = _extract_item_blocks(raw) or raw
+            output, accepted = _accept_fix(output, candidate)
+            if not accepted:
+                _log.warning(_FIX_REJECTED_MSG)
             continue
 
         # Considerar válido se não há erros estruturais (ignorando OrphanItem,
@@ -93,9 +209,14 @@ def validate_and_fix(
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
         raw = _strip_markdown_fences(
-            llm_client.fix(output, last_errors, temperature=temperature)
+            llm_client.fix(
+                output, last_errors, temperature=temperature, system=fix_system,
+            )
         )
-        output = _extract_item_blocks(raw) or raw
+        candidate = _extract_item_blocks(raw) or raw
+        output, accepted = _accept_fix(output, candidate)
+        if not accepted:
+            _log.warning(_FIX_REJECTED_MSG)
 
     # Todas as tentativas falharam
     error_header = (
@@ -114,6 +235,7 @@ async def validate_and_fix_async(
     max_tries: int = 3,
     recorder: "DebugRecorder | None" = None,
     context: tuple | None = None,
+    scope: str = "abstract",
 ) -> Tuple[str, bool]:
     """Versão assíncrona de validate_and_fix() para modos de lote.
 
@@ -127,11 +249,15 @@ async def validate_and_fix_async(
         annotation_key: Nome virtual do arquivo para synesis.load().
         max_tries: Número máximo de tentativas de correção.
         recorder: DebugRecorder opcional (flag --debug). None = sem overhead.
+        scope: "abstract" (SOURCE + ITEMs — padrão dos modos de lote) ou "item"
+            (apenas blocos ITEM, ex.: document/refine). Determina qual system
+            prompt é reenviado nas correções.
 
     Returns:
         (output_final, success) — success=False se todas as tentativas falharam.
     """
     last_errors = ""
+    fix_system = _fix_system_prompt(ctx, scope)
     output = _strip_markdown_fences(output)
     extracted = _extract_annotation_blocks(output)
     if extracted:
@@ -144,6 +270,7 @@ async def validate_and_fix_async(
                 template_content=ctx["template_content"],
                 annotation_contents={annotation_key: output},
                 bibliography_content=ctx.get("bib_content"),
+                dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
@@ -159,11 +286,14 @@ async def validate_and_fix_async(
             ]
             raw = _strip_markdown_fences(
                 await llm_client.fix_async(
-                    output, last_errors, temperature=temperature, context=context
+                    output, last_errors, temperature=temperature, context=context,
+                    system=fix_system,
                 )
             )
-            extracted = _extract_annotation_blocks(raw)
-            output = extracted or raw
+            candidate = _extract_annotation_blocks(raw) or raw
+            output, accepted = _accept_fix(output, candidate)
+            if not accepted:
+                _log.warning(_FIX_REJECTED_MSG)
             continue
 
         if not _has_structural_errors(result):
@@ -191,11 +321,14 @@ async def validate_and_fix_async(
         ]
         raw = _strip_markdown_fences(
             await llm_client.fix_async(
-                output, last_errors, temperature=temperature, context=context
+                output, last_errors, temperature=temperature, context=context,
+                system=fix_system,
             )
         )
-        extracted = _extract_annotation_blocks(raw)
-        output = extracted or raw
+        candidate = _extract_annotation_blocks(raw) or raw
+        output, accepted = _accept_fix(output, candidate)
+        if not accepted:
+            _log.warning(_FIX_REJECTED_MSG)
 
     error_header = (
         f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
@@ -294,6 +427,7 @@ def validate_ontology_entry(
         (output_final, success) — success=False se todas as tentativas falharam.
     """
     last_errors = ""
+    fix_system = _fix_system_prompt(ctx, "ontology")
     output = _strip_markdown_fences(output)
     extracted = _extract_ontology_blocks(output)
     if extracted:
@@ -307,6 +441,7 @@ def validate_ontology_entry(
                 annotation_contents=ctx.get("annotation_contents") or None,
                 ontology_contents={ontology_key: output},
                 bibliography_content=ctx.get("bib_content"),
+                dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
@@ -316,10 +451,14 @@ def validate_ontology_entry(
                 min(attempt, len(CORRECTION_TEMPERATURES) - 1)
             ]
             raw = _strip_markdown_fences(
-                llm_client.fix(output, last_errors, temperature=temperature)
+                llm_client.fix(
+                    output, last_errors, temperature=temperature, system=fix_system,
+                )
             )
-            extracted = _extract_ontology_blocks(raw)
-            output = extracted or raw
+            candidate = _extract_ontology_blocks(raw) or raw
+            output, accepted = _accept_fix(output, candidate)
+            if not accepted:
+                _log.warning(_FIX_REJECTED_MSG)
             continue
 
         if not _has_structural_errors(result):
@@ -334,10 +473,14 @@ def validate_ontology_entry(
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
         raw = _strip_markdown_fences(
-            llm_client.fix(output, last_errors, temperature=temperature)
+            llm_client.fix(
+                output, last_errors, temperature=temperature, system=fix_system,
+            )
         )
-        extracted = _extract_ontology_blocks(raw)
-        output = extracted or raw
+        candidate = _extract_ontology_blocks(raw) or raw
+        output, accepted = _accept_fix(output, candidate)
+        if not accepted:
+            _log.warning(_FIX_REJECTED_MSG)
 
     error_header = (
         f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
@@ -356,6 +499,7 @@ async def validate_ontology_entry_async(
 ) -> Tuple[str, bool]:
     """Versão assíncrona de validate_ontology_entry()."""
     last_errors = ""
+    fix_system = _fix_system_prompt(ctx, "ontology")
     output = _strip_markdown_fences(output)
     extracted = _extract_ontology_blocks(output)
     if extracted:
@@ -369,6 +513,7 @@ async def validate_ontology_entry_async(
                 annotation_contents=ctx.get("annotation_contents") or None,
                 ontology_contents={ontology_key: output},
                 bibliography_content=ctx.get("bib_content"),
+                dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
@@ -378,10 +523,14 @@ async def validate_ontology_entry_async(
                 min(attempt, len(CORRECTION_TEMPERATURES) - 1)
             ]
             raw = _strip_markdown_fences(
-                await llm_client.fix_async(output, last_errors, temperature=temperature)
+                await llm_client.fix_async(
+                    output, last_errors, temperature=temperature, system=fix_system,
+                )
             )
-            extracted = _extract_ontology_blocks(raw)
-            output = extracted or raw
+            candidate = _extract_ontology_blocks(raw) or raw
+            output, accepted = _accept_fix(output, candidate)
+            if not accepted:
+                _log.warning(_FIX_REJECTED_MSG)
             continue
 
         if not _has_structural_errors(result):
@@ -396,10 +545,14 @@ async def validate_ontology_entry_async(
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
         raw = _strip_markdown_fences(
-            await llm_client.fix_async(output, last_errors, temperature=temperature)
+            await llm_client.fix_async(
+                output, last_errors, temperature=temperature, system=fix_system,
+            )
         )
-        extracted = _extract_ontology_blocks(raw)
-        output = extracted or raw
+        candidate = _extract_ontology_blocks(raw) or raw
+        output, accepted = _accept_fix(output, candidate)
+        if not accepted:
+            _log.warning(_FIX_REJECTED_MSG)
 
     error_header = (
         f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
@@ -424,15 +577,27 @@ def _extract_ontology_blocks(text: str) -> str:
 
 
 def _strip_markdown_fences(text: str) -> str:
-    """Remove delimitadores de bloco de código markdown do output do LLM.
+    """Limpa o output do LLM: remove fences markdown e canoniza a indentação.
 
     LLMs frequentemente envolvem o output em ```...``` mesmo quando instruídos
     a não fazê-lo. Esta função remove esses delimitadores para que o compilador
     Synesis receba texto limpo.
+
+    Também normaliza a indentação dos blocos (`normalize_indentation`): a forma
+    do bloco é responsabilidade do Python, não do modelo. No caminho JSON o
+    `block_assembler` já garante isso por construção; aqui a mesma garantia
+    alcança o caminho de texto livre, onde o LLM digita o bloco inteiro. Sem
+    isso, um modelo que esquece de indentar perde o registro por erro de parse
+    — medido em produção com `inclusionai/ling-2.6-flash`.
+
+    É o ponto de passagem obrigatório de todo texto que chega ao validador
+    (12 sítios), o que torna a normalização universal sem tocar em cada laço.
     """
     import re
+
+    from synesis_coder.block_assembler import normalize_indentation
 
     # Remove ``` ou ```synesis ou ```syn (com ou sem newline após)
     stripped = re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
     stripped = re.sub(r"\n?```$", "", stripped.strip())
-    return stripped.strip()
+    return normalize_indentation(stripped.strip())

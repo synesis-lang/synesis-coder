@@ -17,7 +17,7 @@ from synesis_coder.block_assembler import assemble_items
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.project_loader import assert_bibref_known, load_project
 from synesis_coder.prompt_builder import build_item_prompt, build_item_values_prompt
-from synesis_coder.runtime_info import runtime_banner
+from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
 from synesis_coder.schema_builder import build_item_schema
 from synesis_coder.validator import validate_and_fix
 
@@ -28,6 +28,7 @@ def process_item(
     text: str,
     format: Literal["plain", "verbose"] = "plain",
     model: str | None = None,
+    prompt_only: bool = False,
 ) -> str:
     """Gera um bloco ITEM Synesis a partir de um texto e bibref.
 
@@ -38,10 +39,23 @@ def process_item(
         format: "plain" retorna apenas o Synesis gerado;
                 "verbose" inclui log de status e diagnósticos.
         model: ID do modelo LLM (sobrescreve env SYNESIS_CODER_MODEL).
+        prompt_only: Se True, retorna o prompt montado em Markdown e não
+            chama o LLM.
 
     Returns:
-        String com o output Synesis (e log se format="verbose").
+        String com o output Synesis (e log se format="verbose"), ou o prompt
+        em Markdown quando prompt_only=True.
     """
+    if prompt_only:
+        from synesis_coder.prompt_dump import dump_prompt
+
+        # Anotações desatualizadas em relação ao template não impedem a
+        # inspeção do prompt — ver nota em abstract_mode.process_abstract.
+        ctx = load_project(
+            project_path, load_annotations=True, tolerate_annotation_errors=True
+        )
+        return dump_prompt(ctx, mode="item", bibref=bibref, text=text)
+
     # 1. Carregar contexto do projeto
     ctx = load_project(project_path, load_annotations=True)
 
@@ -58,6 +72,10 @@ def process_item(
 
     # 4. Validar e corrigir (erros semânticos residuais: SCALE/BUNDLE/ARITY/código)
     final_syn, success = validate_and_fix(raw_syn, ctx, client)
+
+    # Degradação silenciosa: se o caminho JSON foi abandonado, este bloco saiu
+    # sem as restrições do schema mesmo que a validação tenha passado.
+    warn_schema_fallbacks(client)
 
     # 5. Formatar saída
     if format == "plain":

@@ -426,6 +426,7 @@ class TestIncorporateWithSynesis:
         """O .syn final compilado por synesis.load() não tem erros estruturais."""
         try:
             import synesis
+
             from synesis_coder.project_loader import load_project
             from synesis_coder.validator import _has_structural_errors
         except ImportError:

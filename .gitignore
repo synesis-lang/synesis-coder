@@ -52,3 +52,7 @@ test.bib
 
 # Artefatos gerados manualmente durante testes locais
 test_output/
+
+# Caches de ferramentas
+.mypy_cache/
+.ruff_cache/

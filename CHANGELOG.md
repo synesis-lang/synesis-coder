@@ -7,7 +7,688 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [0.8.0] — 2026-08-11
+
+Primeira publicação no PyPI.
+
+### Security — CI e publicação
+
+- **Todas as GitHub Actions pinadas por SHA de commit** (`.github/workflows/ci.yml`).
+  As entradas `uses:` referenciavam tags mutáveis (`@v4`, `@v5`,
+  `@release/v1`), então uma release comprometida ou re-taggeada rodaria no CI
+  sem qualquer alteração neste repositório. Alinha com `synesis`,
+  `synesis-lsp` e `synesis-graph`, que já pinavam por SHA. Cada SHA foi
+  verificado contra a API do GitHub antes de ser aplicado.
+- **Novo job `security`**, espelhando os outros pacotes Python do ecossistema —
+  era o único dos quatro sem ele:
+  - `pip-audit` sobre as dependências de runtime declaradas no
+    `pyproject.toml`. Não instala o próprio pacote nem os extras `[dev]`, para
+    que a auditoria seja determinística e não falhe por CVE em ferramenta de
+    build.
+  - Varredura de segredos com Gitleaks sobre o histórico completo
+    (`fetch-depth: 0`).
+  - O runner da auditoria é fixado em Python 3.11 porque o passo lê o
+    `pyproject.toml` com `tomllib` (stdlib só a partir do 3.11). É a versão do
+    RUNNER, não o piso do pacote: `requires-python = ">=3.10"` continua valendo
+    e a matriz de testes segue cobrindo 3.10.
+- **`on.push` não disparava em tags.** Faltava `tags: [ 'v*' ]`, então
+  `git push origin v0.8.0` nunca acionaria o workflow — e portanto nunca
+  publicaria. Sem isso toda a automação de release seria inerte.
+- **Scripts órfãos removidos do controle de versão** — `interview_processor.py`,
+  `abstract_processor10.py`, `semantic_memory_builder.py` e
+  `topic_processor.py` (protótipos anteriores ao pacote, ~160 KB) viviam na
+  raiz, rastreados desde o commit inicial. Já constavam do `.gitignore` sob
+  "Sample codes", mas `.gitignore` não desrastreia o que já está rastreado.
+  Nenhum era importado pelo pacote, pelos testes ou pela documentação.
+
+### Fixed — guarda dos testes de integração era inerte
+
+- **O `skipif` que protegia os testes de chamada real de API nunca disparava.**
+  Os módulos definiam `HAS_API_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))`
+  no nível do módulo — avaliado no **import**, poucas linhas depois de
+  `load_dotenv()`. Em qualquer máquina com `.env` (todo ambiente de dev) o valor
+  era sempre `True` e o `skipif` era código morto. A única proteção efetiva era
+  o marker `integration`, deselecionado por `addopts`.
+  - O sintoma inverso também existia: **sem** chave, esses testes não pulavam —
+    falhavam adiante com `OSError: ANTHROPIC_API_KEY não encontrada`, vindo de
+    dentro do client. Medido: `pytest -m integration` sem chave dava
+    **5 failed em 61s**; agora dá **14 skipped em 0,7s**.
+  - Novo `tests/conftest.py` com `pytest_collection_modifyitems`, que roda
+    **depois** de todos os imports e portanto lê o ambiente já com o `.env`
+    aplicado. Uma única guarda cobre os quatro módulos de integração e não
+    depende de ordem de import.
+  - Cobre também `test_ontology_mode.py`, cujos 3 testes de integração não
+    tinham guarda de credencial alguma — só o marker.
+  - `HAS_API_KEY` e o `skipif` removidos dos três módulos (e o import `os` que
+    ficou órfão). O marker `integration` é preservado: a defesa em profundidade
+    passa a ser `addopts` + comando explícito no CI + ausência de credencial no
+    CI + esta guarda.
+
+### Added — GitHub Release automática
+
+- O job `publish` passa a criar a **GitHub Release** ao publicar no PyPI,
+  extraindo o corpo da seção `## [X.Y.Z]` correspondente deste arquivo — sem
+  duplicar o texto à mão. Antes, uma tag publicava no PyPI e deixava a aba
+  Releases desatualizada.
+  - Exige `permissions: contents: write` além do `id-token: write` do OIDC.
+  - A extração falha explicitamente (`::error::` + `exit 1`) quando a versão
+    não tem seção no CHANGELOG, em vez de criar uma Release vazia em silêncio.
+  - `softprops/action-gh-release` pinada por SHA, como as demais.
+  - Processo documentado em `RELEASING.md` (novo), no `synesis-graph`.
+
+### Added — contrato de empacotamento (pré-PyPI)
+
+- **`tests/test_packaging.py`** (9 testes) — constrói o sdist de verdade e
+  inspeciona o `PKG-INFO` gerado, em vez de confiar no que o `pyproject.toml`
+  declara. Publicar no PyPI é irreversível: o nome fica reservado para sempre e
+  uma versão enviada nunca pode ser sobrescrita.
+  - Licença: `License-Expression` PEP 639 correta, **ausência** do campo
+    obsoleto `License:`, e ambos os arquivos (`LICENSE`, `LICENSE.exception`)
+    declarados **e** empacotados — a exceção só vale se o arquivo dela viajar
+    junto.
+  - Conteúdo: nenhum `config.toml` (carrega chave real), `.db`, `.env` ou
+    `.vsix` no artefato; e nenhum dos quatro scripts órfãos removidos acima.
+  - Consistência: versão do sdist, do `CITATION.cff` e deste arquivo conferidas
+    contra o `pyproject.toml` — o CFF defasado já aconteceu duas vezes no
+    ecossistema.
+  - Verificado por mutação: trocando a licença pela sintaxe legada
+    `{text = "..."}`, 7 dos 9 falham. `twine check` **passa** nesse cenário — é
+    por isso que ele não basta.
+
+### Fixed — metadados de publicação
+
+- **`pyproject.toml` não declarava `authors`** — o pacote seria publicado sem
+  creditar o autor. Adicionados também `description`, `readme`, `keywords`,
+  `classifiers` e `[project.urls]`, todos ausentes.
+- **`CITATION.cff` citava a obra errada** — `title` trazia *"Synesis: A DSL
+  compiler for knowledge engineering"*, o título do compilador, então quem
+  citasse o synesis-coder creditaria o pacote errado. (O mesmo título copiado
+  está no `synesis-lsp` — vale corrigir lá também.)
+
+### Fixed — documentação
+
+- **Matriz de compatibilidade do README desatualizada em todas as linhas:**
+  `synesis 0.5.5` (real: 0.11.0), `synesis-coder 0.7.3` (0.8.0), `synesis-lsp
+  0.15.4` (0.22.0), `synesis-graph 0.2.0` (0.5.0), e o constraint listado como
+  `≥0.5.5` quando os três consumidores exigem `>=0.10.0`. A seção Requirements
+  repetia o mesmo `≥ 0.5.5`.
+- **O subcomando `dataset` não era documentado** no README, embora exposto na
+  CLI e descrito abaixo nesta mesma versão. Seção adicionada com as opções
+  reais lidas do `--help`. `dataset_mode.py` e `prompt_dump.py` também faltavam
+  na árvore de arquivos.
+- **Duas variáveis de ambiente lidas em runtime não constavam do README:**
+  `SYNESIS_CODER_MAX_TOKENS` (`llm_client.py`) e `SYNESIS_CODER_LANGUAGE`
+  (`project_loader.py`).
+
+### Fixed — CI
+
+- **CI reportava verde com zero testes executados.** O passo de testes
+  tolerava o exit code 5 do pytest (`no tests collected`) como sucesso:
+
+  ```
+  python -c "... sys.exit(0 if code == 5 else code)"      # antes
+  pytest -m "not integration" --cov=synesis_coder ...     # agora
+  ```
+
+  Não era hipotético: o mesmo padrão mascarou uma quebra real no
+  `synesis-lsp`, onde um `jsonschema` desatualizado fazia `test_contract.py`
+  falhar no import, abortando a coleta da suíte inteira enquanto o CI seguia
+  verde. Corrigido em `synesis`, `synesis-lsp`, `synesis-graph` e
+  `synesis-coder`. O filtro `-m "not integration"` foi preservado.
+
+- **`ruff check synesis_coder/` falhava** por blocos de import fora de ordem em
+  `modes/abstract_mode.py`, `modes/dataset_mode.py` e `modes/document_mode.py`.
+  Como o ruff é bloqueante no CI, isso sozinho quebrava o pipeline. Suíte
+  reverificada após a correção: 505 passaram, 14 deselecionados.
+
+### Fixed
+
+- **Campos SOURCE não recebiam os valores permitidos no prompt**
+  (`prompt_builder.py`) — `_build_source_fields_section` montava a instrução com
+  `guidelines or description or genérica`, **sem** chamar `_field_instruction`.
+  Os escopos ITEM e ONTOLOGY chamavam. Consequência: um `ENUMERATED` em SOURCE
+  chegava ao modelo sem a lista de valores, um `SCALE` sem a faixa, um `CHAIN`
+  sem as RELATIONS.
+  - **Medido no face85** (FACE/UFMG, ~2.500 abstracts): a GUIDELINE de
+    `knowledge_area` diz *"O valor deve ser exatamente uma das opções acima"* —
+    e nenhuma opção era enviada. No caminho JSON o `enum` do schema ainda
+    restringia a saída; no caminho de **texto livre** não havia defesa alguma.
+    Coerente com os valores inválidos encontrados no `.syn` do projeto
+    (`Business_Administration`, `Not_Specified`, ambos fora dos 8 valores).
+  - As **descrições** dos valores (`Administração — Teoria organizacional,
+    pesquisa operacional…`) nunca chegavam ao modelo por via alguma: o `enum`
+    do schema carrega apenas os labels. São elas que desambiguam a escolha.
+  - `_field_instruction` ganha o parâmetro `fallback`, e SOURCE passa o seu
+    genérico **por nome** (`_generic_source_instruction`). Sem isso, adotar o
+    genérico por tipo degradaria campos de metadado documental — `description`
+    cairia de *"Describe the study objective and scope"* para *"Provide relevant
+    descriptive text"*. Há teste de regressão para exatamente esse ponto.
+- **Resposta não-JSON não era re-tentada nem contabilizada** (`llm_client.py`) —
+  `call_json`/`call_json_async` devolviam `None` quando `_parse_json_response`
+  falhava, sem re-tentar **e sem incrementar `schema_fallbacks`**. O registro
+  saía em texto livre, sem as restrições do schema, e nada no pipeline
+  registrava a degradação — nem o aviso de fim de execução, que lê esse mesmo
+  contador.
+  - Verificado antes da correção: resposta `"isto nao e json"` →
+    `retorno=None`, `schema_fallbacks=0`, `api_calls=0`.
+  - Dos gatilhos de fallback, apenas `TokenBudgetExhausted` re-tentava. Erro do
+    backend (400/rede) segue sem retry — repetir não ajuda —, mas já
+    contabilizava.
+  - Agora: **1 re-tentativa** com `temperature=0.2`. A geração roda em `0.0`;
+    repetir com o mesmo valor tende a reproduzir a mesma saída malformada — é a
+    lógica de `validator.CORRECTION_TEMPERATURES`. Retry bem-sucedido **não**
+    conta como fallback (o schema foi preservado); só a desistência conta.
+    Caminho feliz inalterado: uma chamada, custo zero.
+- **Envelope JSON com forma errada caía em silêncio** (`abstract_mode.py`) — um
+  dict sem as chaves `source`/`items` fazia o modo cair para texto livre sem
+  registro algum: `call_json` já havia devolvido um dict (logo, não contabilizou
+  fallback) e o bloco resultante saía válido e marcado OK. Agora emite WARNING
+  **nomeando o bibref** e as chaves recebidas, e contabiliza o fallback.
+- **A indentação do bloco deixa de depender do modelo** (`block_assembler.py`,
+  `validator.py`) — a moldura do bloco é FORMA, não conteúdo. No caminho JSON o
+  `_assemble_block` já emitia `_INDENT` por construção; o caminho de texto
+  livre entregava o que o LLM digitasse. Novo `normalize_indentation()`
+  reescreve a indentação para a forma canônica (abertura/`END` na coluna 0,
+  campos com 4 espaços), encadeado em `_strip_markdown_fences` — o ponto de
+  passagem obrigatório de todo texto que chega ao validador (12 sítios), o que
+  torna a garantia universal sem tocar em cada laço.
+  - **Medido em produção** (`inclusionai/ling-2.6-flash`): um registro emitiu o
+    SOURCE sem indentação alguma, o parser LALR rejeitou com `Token inesperado
+    TEXT_LINE`, as 3 correções falharam e o registro foi **perdido**. Outro usou
+    2 espaços. Reprocessando o arquivo real: **PARSE FAIL → compila com 0
+    erros**, 15 ITEMs recuperados.
+  - Deliberadamente mínima: não altera valores, preserva linhas em branco e
+    texto fora de blocos (`# ERRO`), e é idempotente.
+- **Loop degenerativo do modelo gerava ITEMs duplicados sem detecção**
+  (`block_assembler.py`, `dataset_mode.py`, `abstract_mode.py`) — modelos fracos
+  re-emitem o mesmo ITEM até esgotar o orçamento. Medido: **121 ITEMs para 22
+  únicos** num registro, com um `criterio` repetido 88 vezes. Nada barrava:
+  ITEMs repetidos são sintaticamente válidos (um código PODE reaparecer em
+  trechos distintos), o compilador aceita, o schema não limita contagem e a
+  guarda de idempotência só rejeita PERDA. Novo `dedupe_item_blocks()`,
+  determinístico por texto do bloco (espaços colapsados) — dois ITEMs com o
+  mesmo `criterio` mas trechos diferentes são preservados. O `document_mode` já
+  tinha dedup para o caso análogo de chunks; abstract/dataset não tinham.
+  Reprocessando o arquivo real: **121 → 22 ITEMs, 99 duplicatas removidas**.
+- **Registro sem nenhuma anotação era reportado como OK**
+  (`dataset_mode.py`, `abstract_mode.py`) — `validate_and_fix` garante SINTAXE,
+  não COBERTURA. Um `.syn` com SOURCE e zero ITEMs é válido: `ok=True` voltava,
+  o arquivo era gravado e o resumo contava como sucesso. Em lote grande isso é
+  invisível — o operador vê "N OK" sem saber que k registros saíram vazios.
+  Agora `count_item_blocks() == 0` rebaixa para falha, com log em ERROR e status
+  `SEM ITEMs` distinto de `FALHA NA VALIDAÇÃO`.
+  - Testes: `tests/test_output_normalization.py` (novo, 18 casos) — indentação
+    (incluindo os dois casos reais), idempotência, preservação de valores e de
+    texto fora de blocos, dedup (incluindo a forma real 22/121) e contagem.
+    Suíte: 487 → 505 passed.
+
+- **Caminho JSON caía para texto livre em silêncio quando o raciocínio esgotava
+  o orçamento de tokens** (`llm_client.py`) — modelos de raciocínio podem pensar
+  por conta própria mesmo com `thinking=False` no payload (o coder não controla
+  isso). Quando o raciocínio consumia todo o `max_tokens`, a resposta chegava
+  com `stop_reason="max_tokens"` e só blocos de thinking; o `RuntimeError`
+  genérico era capturado por `call_json`, logado em WARNING e convertido em
+  `None` — "caia para texto livre". O registro saía válido e marcado OK, sem
+  nada indicando que perdera enum/minimum/maximum/additionalProperties.
+  - Nova exceção tipada `TokenBudgetExhausted` distingue a condição operacional
+    (orçamento insuficiente, corrigível) da limitação de backend (schema não
+    suportado) — que exigem ações opostas e antes se confundiam no mesmo log.
+  - **Retry automático** com o dobro do orçamento (`_retry_max_tokens`, teto de
+    64.000) antes de desistir. Os tokens da primeira tentativa já foram pagos;
+    refazer em texto livre pagaria de novo sem recuperar as garantias.
+  - `_call_sync_inner` ganha `force_max_tokens=`, que **vence
+    `SYNESIS_CODER_MAX_TOKENS`** — sem isso o retry repetiria o mesmo orçamento
+    que acabou de estourar (o env var vencia tudo na precedência anterior),
+    tornando a correção inerte exatamente no cenário de produção que a motivou.
+  - Desistência definitiva agora loga em **ERROR** (não WARNING), nomeando as
+    garantias perdidas e a variável a ajustar.
+- **Fallbacks de schema eram invisíveis** (`token_usage.py`, `llm_client.py`) —
+  em lote, alguns registros rodavam com schema e outros sem, e a diferença não
+  aparecia em lugar nenhum. Novo contador `schema_fallbacks` +
+  `record_schema_fallback()`, exibido em `summary_line()` só quando não-zero.
+- **O loop de correção podia truncar o arquivo** (`validator.py`) — caso
+  documentado em produção: 19 ITEMs → 1, com perda do bloco SOURCE. Como a saída
+  seguia sintaticamente válida, nada detectava a mutilação. Nova guarda
+  `_accept_fix()` rejeita correções que **perdem** blocos (menos ITEMs, ou
+  SOURCE que existia e sumiu) e mantém a versão anterior, logando o motivo.
+  Deliberadamente conservadora: contagem igual ou maior passa, porque dividir um
+  ITEM malformado em dois é resultado legítimo. Aplicada nos 4 pontos de
+  reatribuição de `output` (item e annotation, ambos os laços).
+- **`cache_control` era descartado para Anthropic via OpenRouter**
+  (`_translate_messages_openai`) — a maioria dos provedores OpenAI-compatíveis
+  faz caching automático por prefixo, mas Anthropic e Qwen exigem breakpoints
+  explícitos. Sem eles, o system prompt (grande e estável) era reprocessado a
+  preço cheio em toda chamada. `_provider_requires_explicit_cache()` detecta
+  pelo prefixo do ID (`anthropic/`, `qwen/`) e emite o content-block com
+  `cache_control`; os demais seguem como string simples.
+  - Testes: `tests/test_json_path_and_guards.py` (novo, 25 casos) cobrindo os
+    quatro defeitos — exceção tipada vs. genérica, retry e teto, precedência
+    sobre o env var, contabilização, guarda de idempotência (incluindo o caso
+    real de truncagem) e detecção de provedor. Suíte: 462 → 487 passed.
+
+- **O loop de correção descartava o system prompt (GUIDELINES)** (`llm_client.py`,
+  `validator.py`) — `fix()`/`fix_async()` montavam a chamada de correção como uma
+  única mensagem `role: "user"` (bloco anterior + diagnóstico + "conserte"), sem
+  nenhuma mensagem `system`. Como o branch Anthropic só anexa `system` quando
+  `system_blocks` é não-vazio, e o branch OpenAI apenas repassa as mensagens, a
+  correção ia à API **sem as GUIDELINES do template** — réguas de score,
+  proibições de domínio, regras de multiplicidade e `code_index`.
+  - **O efeito era cumulativo:** `validate_and_fix[_async]` reatribui `output` a
+    cada iteração (até 3, com temperatura escalando 0.0→0.2→0.5), então cada
+    rodada corrigia um artefato já produzido sem as regras, também sem as regras.
+    Isso explica a degradação progressiva observada em produção.
+  - **Agnóstico de modelo:** diferente dos defeitos que um modelo forte mascara,
+    aqui a instrução literalmente não estava na chamada — nenhum modelo podia
+    obedecer uma régua que não recebeu.
+  - Correção: `_build_fix_messages()` (novo) insere o system como PRIMEIRA
+    mensagem, marcada `cache: True`. `fix`/`fix_async` ganham os parâmetros
+    `system=` e `schema=` (ambos opcionais, default `None` → comportamento
+    antigo preservado).
+  - `validator.py` ganha `_fix_system_prompt(ctx, scope)`, que remonta o prompt
+    a partir do mesmo `ctx` da geração — `"item"` (item/document/refine),
+    `"abstract"` (abstract/dataset) e `"ontology"`. Falha na remontagem degrada
+    graciosamente para `None` (correção cega, como antes), nunca derruba a
+    validação. As **8** chamadas a `fix`/`fix_async` no validator repassam o
+    system, incluindo os caminhos de erro de parse e as duas funções de ontology.
+  - **Ganho de custo, não só de qualidade:** sendo byte-a-byte idêntico ao da
+    geração, o prefixo casa com o cache já gravado — o reenvio custa ~0.1x
+    (Anthropic) ou ~0.25–0.5x (OpenAI-compat, cache automático) em vez de 1.0x.
+    Antes desta correção o coder pagava o prêmio de escrita do cache em toda
+    geração e descartava o prefixo justamente na única chamada que o reusaria.
+  - **`schema=` foi adicionado à assinatura de `fix`/`fix_async`, mas o
+    validator deliberadamente NÃO o usa** — e o defeito irmão (fix perde as
+    garantias estruturais do schema) **continua aberto**. Motivo: com schema o
+    modelo devolve JSON de valores, enquanto o laço de correção trata o retorno
+    como texto Synesis (`_extract_*` → `synesis.load()`). Propagá-lo faria o
+    JSON cru chegar ao compilador e falhar em toda tentativa. Fechar aquele
+    defeito exige um caminho JSON completo para a correção (prompt de valores +
+    schema + `block_assembler` no retorno) — mudança de escopo maior,
+    documentada em `validator.py` e no estudo §6.2.
+  - `document_mode` e `refine_mode` passam `scope="item"` (geram só ITEMs);
+    os demais usam o default do escopo correspondente.
+  - **Testes**: `tests/test_fix_preserves_context.py` (novo, 16 casos) —
+    montagem das mensagens, presença de `system` + `cache_control` no payload
+    real dos dois backends, propagação de `schema`, os três escopos de
+    reconstrução, degradação graciosa e repasse em ambos os validators.
+    15 dos 16 foram verificados falhando contra a versão anterior.
+    Suíte: 446 → 462 passed.
+  - Estudo completo: `Planning/Estudo_Fix_Perde_System_Prompt.md`.
+
+### Added
+
+- **`--prompt-only`: extração do prompt montado** (`prompt_dump.py` novo,
+  `cli.py`, modos `item`/`abstract`/`document`/`ontology`) — grava em Markdown
+  o prompt que **seria** enviado ao modelo, e encerra. Nenhuma chamada LLM,
+  nenhum token gasto.
+  - Destino padrão `<projeto>_<modo>_prompt.md` ao lado do `.synp`;
+    `--output` escolhe outro caminho (criando diretórios intermediários), e no
+    `abstract` o `--output-dir` é respeitado. O caminho é reportado em
+    **stderr por escrita direta**, não pelo logger: `-q` eleva o nível para
+    WARNING e engoliria um `log(22)`/DEST — e `-q` é justamente o que se usa
+    para calar o banner neste modo. Com `-qq` a saída é uma linha: o arquivo
+    gerado.
+  - Arquivo, não stdout, porque o artefato é para leitura e revisão — o dump
+    do face85 passa de 460 linhas, tamanho em que rolar o terminal não serve.
+  - Motivação: a qualidade da extração é governada pelas GUIDELINES do
+    template, e não havia como lê-las na forma renderizada sem executar o
+    pipeline. O `--debug` (`debug_log.py`) grava os prompts, mas só **depois**
+    de rodar e pagar.
+  - Reusa as funções de `prompt_builder` que rodam em produção — o dump não
+    pode divergir do prompt real. O caminho (JSON vs texto livre) é resolvido
+    como os modos resolvem: `resolve_path()` espelha
+    `supports_json_schema()` **sem instanciar `LLMClient`**, para que a
+    inspeção não exija credencial de API.
+  - Saída autossuficiente: seções `## SYSTEM` / `## USER` em blocos de código,
+    com cerca dimensionada ao conteúdo (GUIDELINES podem conter crases).
+    Serve para colar num chat, alimentar um harness de teste de prompt, ou
+    versionar junto a uma revisão do `.synt`.
+  - `--output`/`--output-dir` deixam de ser obrigatórios nesses quatro
+    comandos, com guarda explícita que preserva a exigência fora do
+    `--prompt-only` (`Missing option '--output' (required unless
+    --prompt-only)`).
+  - Anotações desatualizadas em relação ao template **não** bloqueiam a
+    inspeção (`tolerate_annotation_errors=True`): revisar GUIDELINES é o que se
+    faz enquanto o template muda e o corpus antigo ainda não migrou. No modo
+    `ontology` o `.syno` é dispensado pelo mesmo motivo.
+  - Encontrou dois defeitos reais no primeiro uso: a ausência dos VALUES em
+    SOURCE (corrigida acima) e, no `face85.synt`, a contradição entre
+    `EXISTING PROJECT CONCEPTS` em snake_case e a regra PascalCase do campo
+    `code` — esta última é conteúdo de template, não do coder.
+- **Aviso de degradação silenciosa do schema** (`runtime_info.py`, quatro modos
+  geradores) — novo `warn_schema_fallbacks()`, emitido em **WARNING** ao fim da
+  execução quando algum registro caiu para texto livre.
+  - O contador `schema_fallbacks` já existia, mas só aparecia em
+    `usage.summary_line()` — emitido **apenas** com `--format verbose`. No
+    formato padrão o pesquisador via `OK: 3 (100%)` sem sinal algum de que
+    parte do corpus rodou sem `enum`, `minimum/maximum` e
+    `additionalProperties`.
+  - WARNING (não INFO) porque a condição é corrigível — aumentar
+    `SYNESIS_CODER_MAX_TOKENS` cobre o caso dominante — e porque o silêncio
+    aqui compromete a validade do dado, não apenas o custo. Sobrevive a `-q`.
+  - **Limitação conhecida:** o aviso é agregado por execução ("N registros"),
+    não identifica quais — exceto no caso do envelope inválido, que nomeia o
+    bibref. Ver *Registrado para implementação futura* abaixo.
+- **Testes**: 30 novos casos, todos verificados falhando contra a versão
+  anterior — `tests/test_source_field_values_and_fallback_warning.py` (11:
+  ENUMERATED/ORDERED/SCALE em SOURCE, descrições dos valores, precedência da
+  GUIDELINE, preservação do fallback por nome, ausência de bloco espúrio em
+  campo sem VALUES, e o aviso de fallback), `tests/test_malformed_json_retry.py`
+  (10: retry sync e async, temperatura elevada, retry bem-sucedido não conta
+  fallback, desistência conta, caminho feliz sem chamada extra), 3 em
+  `tests/test_abstract_mode.py` (envelope inválido) e 6 em `tests/test_cli.py`
+  (contrato do `--prompt-only`: presença no help dos quatro modos, nome padrão
+  derivado de projeto+modo, `--output` explícito com criação de diretório, e o
+  destino em stderr — regressão do caso em que `-q` engolia a linha).
+  Suíte: 505 → 535 passed.
+
+### Registrado para implementação futura
+
+- **Marcar no próprio `.syn` os registros gerados sem as garantias do schema.**
+  O aviso de `warn_schema_fallbacks()` é agregado por execução: informa que N
+  registros degradaram, não **quais**. Num corpus de 3 abstracts isso basta;
+  nos ~2.500 do face85, não — o pesquisador saberia que há um problema sem
+  saber onde auditar, e o `.syn` gravado não carrega vestígio algum da
+  degradação (o bloco é sintaticamente válido e conta como OK).
+  - Forma provável: um comentário no bloco do registro afetado (ex.
+    `# schema-fallback: gerado em texto livre`), preservado pelo compilador
+    como comentário e legível por `grep` ou pelo LSP.
+  - **Não implementado agora porque altera o formato de saída** — o `.syn` é
+    consumido pelo compilador, pelo `synesis-lsp`, pelo `synesis-graph` e pelo
+    pipeline ACT (`critique` → `normalize` → `incorporate`). A marcação precisa
+    sobreviver ao round-trip dessas etapas sem virar ruído nem ser descartada,
+    o que é decisão de design de formato, não detalhe de implementação.
+  - Estudo: `Planning/Marcacao_Registros_Degradados.md`.
+
+- **Instrumentação de prompt caching** (`token_usage.py`, `llm_client.py`) — o
+  coder passa a ler e reportar as métricas de cache que os dois backends já
+  devolviam e que eram silenciosamente descartadas. Sem elas não havia como
+  saber se o `cache_control` (marcado em todos os prompts desde sempre) estava
+  funcionando, nem medir o que ele economiza.
+  - `TokenUsage` ganha `cache_write_tokens` e `cache_read_tokens`; os kwargs
+    de `record()` têm default `0`, então todos os chamadores existentes seguem
+    funcionando sem alteração.
+  - Backend **Anthropic**: lê `cache_creation_input_tokens` /
+    `cache_read_input_tokens`. O rate limiting proativo passa a contar o prompt
+    inteiro (cache também consome cota), não apenas o resto não-cacheado.
+  - Backend **OpenAI-compat**: lê `prompt_tokens_details.cached_tokens` /
+    `.cache_write_tokens`. Prompt caching é **automático** na maioria desses
+    provedores (OpenAI, DeepSeek, Grok, Moonshot, Z.AI) — não exige
+    `cache_control` — e o OpenRouter sempre inclui usage accounting.
+  - **Semântica divergente tratada:** na Anthropic `input_tokens` é apenas o
+    resto não-cacheado (total = input + write + read); no OpenAI-compat
+    `prompt_tokens` já é o total e `cached_tokens` é subconjunto. Somar
+    ingenuamente causaria dupla contagem no caminho OpenAI. Nova propriedade
+    `total_prompt_tokens` trata a diferença via o flag `input_excludes_cache`;
+    `total_tokens` passa a usá-la.
+  - `summary_line()` ganha o segmento `cache w N/r N`, exibido **apenas** quando
+    há atividade de cache — a linha permanece idêntica em provedores sem cache,
+    preservando os testes e a saída existentes.
+  - Helper `_int_attr()` coage atributos ausentes/não-inteiros para `0`
+    (necessário porque `getattr` num `MagicMock` devolve outro `MagicMock`, não
+    o default — os testes existentes usam mocks assim).
+  - **Testes**: 11 novos casos (`tests/test_token_usage.py`) cobrindo default-zero,
+    acumulação, as duas semânticas de total, exibição condicional, e captura real
+    nos dois branches do client. Cada um foi verificado falhando contra a versão
+    anterior. Suíte: 435 → 446 passed.
+  - Diagnóstico habilitado: `cache_write > 0` com `cache_read == 0` indica cache
+    escrito e nunca reusado; `cache_read == 0` em execuções repetidas indica
+    invalidador silencioso no prefixo. Ver
+    `Planning/Estudo_Fix_Perde_System_Prompt.md` §8.
+
+### Licença — sem licença → AGPL-3.0-only + Synesis Data-Output Exception
+
+- Migração aplicada em 2026-08-02, junto com o restante do ecossistema.
+  Estudo completo: `synesis-planning/synesis/new_licence_policy.md`.
+  - `synesis-coder` **não tinha `LICENSE` nem campo `license` algum** ("todos
+    os direitos reservados" de facto) — é o único pacote sem histórico
+    prévio no PyPI, por isso estreia direto em AGPL, sem MIT anterior a
+    conciliar.
+  - Novo `LICENSE` (AGPL-3.0 integral, obtido de gnu.org) + `LICENSE.exception`
+    (idêntico ao do core).
+  - `pyproject.toml`: `license = "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"`
+    + `license-files = ["LICENSE", "LICENSE.exception"]`; `setuptools>=77`.
+  - `README.md`: seção "License" (antes só "MIT") substituída pelo bloco de
+    aviso que ativa a exceção — sem esse aviso a exceção não se aplica a
+    nenhum arquivo.
+  - `CITATION.cff`: `license: AGPL-3.0-only`, exceção referenciada no
+    `abstract` (o schema 1.2.0 rejeita `LicenseRef-` no campo `license`).
+
+### Added
+
+- **Novo subcomando `dataset`** — processa um corpus TOML declarado por
+  `INCLUDE DATASET` no `.synp`, gerando SOURCE + ITEMs por registro (espelha
+  `abstract`, que itera um corpus `.bib`). Requer `synesis >= 0.10.0`.
+  - `synesis-coder dataset --project lattes.synp --output-dir annotations/`
+    processa o corpus inteiro (o caminho vem do `INCLUDE DATASET` do `.synp`);
+    `--dataset <glob>` sobrescreve pontualmente sem editar o projeto.
+  - `modes/dataset_mode.py` (novo): `parse_dataset_records` +
+    `_serialize_record` (contexto por `CONTEXT FROM DATASET`, com pré-filtro —
+    determinístico, testável sem LLM) + `process_dataset` (reusa
+    `_generate_abstract_syn` para a geração SOURCE+ITEMs).
+  - `project_loader`: `_dataset_key_path` descobre a chave de indexação do
+    campo `IDENTIFIES` + `ON DATASET` do template (agnóstico de domínio — não
+    presume schema de currículo); `ctx["dataset_index"]` populado e propagado a
+    `synesis.load()`.
+- Menu de comandos e `_EPILOG_DATASET` com exemplos de uso.
+
+### Added (correção pré-commit)
+
+- **Feedback de progresso no `dataset` (`dataset_mode.py`)** — o comando
+  processava o corpus inteiro em silêncio (nenhuma linha entre o início e o
+  resumo final), dando a impressão de travamento em corpora grandes ou com
+  `--concurrent` baixo. Três pontos de `logger.info` adicionados (nível padrão
+  do CLI já é INFO — sem flag nova):
+  - início do lote: `Iniciando geração (concurrent=N)`;
+  - por registro concluído, na ordem real de conclusão (não de submissão —
+    `asyncio.gather` não preserva ordem): `[i/N] <bibref> — OK` /
+    `ERRO: <motivo>` / `FALHA NA VALIDAÇÃO`;
+  - resumo final ganhou tempo decorrido: `Processados N registro(s): X OK, Y
+    com falha (Zs)`.
+  - Granularidade deliberadamente por registro, não por chamada LLM interna
+    (um registro pode disparar até 4 chamadas via `validate_and_fix_async`) —
+    evita ruído sem esconder progresso real.
+
+### Fixed
+
+- **Prompt e schema pediam ao LLM campos com origem-de-valor externa**
+  (`ON BIBLIOGRAPHY`/`ON DATASET`) — o modelo era instruído a gerar valores que
+  o compilador já resolve da fonte externa, desperdiçando tokens e, em pelo
+  menos um caso real, induzindo um valor fabricado (`false`) para um campo TOML
+  vazio. `_build_source_fields_section` (prompt_builder) e
+  `_scope_object_schema` (schema_builder) agora excluem esses campos.
+- **`block_assembler._assemble_block` não pulava campos de origem externa** —
+  gravava `NA` para um campo `REQUIRED` ausente no JSON do LLM mesmo quando o
+  campo é `ON BIBLIOGRAPHY`/`ON DATASET` (cujo valor nunca deveria vir do LLM).
+  Agora esses campos são pulados incondicionalmente na montagem do bloco.
+- **Validador do coder (`validator.py`) não repassava o dataset ao compilador**
+  — as 4 chamadas a `synesis.load()` agora passam `dataset_index=
+  ctx.get("dataset_index")`, sem o que a validação de projetos com dataset
+  falhava por não enxergar os valores resolvidos.
+- **Rede de segurança contra alucinação no caminho texto-livre** —
+  `_strip_external_fields` (dataset_mode) remove linhas de campo externo que o
+  fallback texto-livre eventualmente escreva, aplicada antes e depois do loop
+  de validação/correção.
+
+### Changed
+
+- **`CONTEXT FROM DATASET` mudou de ancoragem no `synesis` 0.10.0** (de cláusula
+  do bloco `SOURCE/ITEM FIELDS` para propriedade do bloco `FIELD`). **Nenhuma
+  alteração foi necessária neste pacote:** `_declared_context_sections`
+  (dataset_mode) lê `spec.context_from_dataset` — o atributo do `FieldSpec` —,
+  não a estrutura do bloco do template. Registrado aqui porque o requisito
+  `synesis >= 0.10.0` agora implica a sintaxe nova: um `.synt` com a forma
+  antiga passa a ser erro de sintaxe.
+
+### Fixed (correção pré-commit)
+
+- **`INCLUDE ANNOTATIONS`/`ONTOLOGY` com padrão glob era descartado em
+  silêncio** (`project_loader._collect_includes`) — a resolução testava cada
+  literal do `.synp` com `Path.is_file()`, que é sempre `False` para um
+  padrão como `"annotations/*.syn"`; o `continue` subsequente descartava o
+  include sem warning. `code_index`/`ontology_index` ficavam vazios mesmo com
+  anotações reais no disco, e como `code_index` alimenta o prompt de extração
+  ("conceitos existentes"), a própria geração rodava sem o vocabulário
+  acumulado do corpus. Corrigido delegando a `synesis.parser.paths.has_glob`/
+  `resolve_glob` (mesmos utilitários do compilador principal, com a mesma
+  contenção de diretório — `../*.syn` não escapa do projeto).
+- **`INCLUDE SHARED ONTOLOGY` nunca era reconhecido** (mesma função) — a
+  regex de includes não cobria a palavra `SHARED`, então uma ontologia
+  compartilhada fora do diretório do projeto (`INCLUDE SHARED ONTOLOGY
+  "../ontologia.syno"`) nunca era lida. Regex ajustada para aceitar o
+  qualificador opcional e repassar `shared=True` a
+  `synesis.parser.paths.resolve_include` (que autoriza o alvo externo).
+  **Combinado com o bug do glob acima**, o efeito em `ontology --update` era
+  duplo: nem os códigos pendentes nem a ontologia já definida eram vistos.
+- **`synesis-coder ontology --update` apagava entradas curadas do `.syno`**
+  (`ontology_mode.process_ontology`) — `_get_pending_codes` exclui de
+  propósito os códigos já definidos (é o próprio objetivo do `--update`), mas
+  a escrita final gravava só as entradas recém-geradas com `overwrite=True`,
+  descartando todo o conteúdo pulado. Observado em caso real: uma ontologia
+  compartilhada com 74 entradas curadas virou 59 após um `--update`. Corrigido
+  lendo o `.syno` existente antes de escrever e anexando as novas entradas ao
+  final (separadas por um cabeçalho de seção), em vez de substituir o arquivo.
+- **Schema JSON rejeitado (HTTP 400) por provedores `strict` (OpenAI/Azure via
+  OpenRouter)** (`schema_builder._scope_object_schema`) — o schema declarava
+  `required` só com os campos `REQUIRED` do template, mas `llm_client` envia
+  `strict: True` fixo para o backend `openai`-compatível; a spec de
+  *structured outputs* da OpenAI exige que **todo** campo de `properties`
+  conste em `required` sob `strict`, expressando opcionalidade por tipo
+  nullable, não por ausência. O erro 400 (`'required' is required to be an
+  array including every key in properties`) fazia o caminho JSON cair
+  silenciosamente para texto livre — descartando por baixo dos panos as
+  garantias que o schema existe para dar: `enum` de ENUMERATED/ORDERED,
+  `minimum`/`maximum` de SCALE, `enum` de relação de CHAIN e
+  `additionalProperties: false`. Corrigido: todo campo agora entra em
+  `required`; os que o template declara `OPTIONAL` recebem tipo nullable
+  (novo helper `_nullable`, que trata os três formatos de fragmento — `type`,
+  `enum`, `const`). `block_assembler._has_value` já descarta `None`, então um
+  campo opcional omitido pelo modelo continua ausente no `.syn` gerado.
+
+### Testing (correção pré-commit)
+
+- `tests/test_project_loader_includes.py` (novo, 9 testes) — cobre expansão
+  de glob, contenção de diretório, `INCLUDE SHARED ONTOLOGY` com e sem alvo
+  externo, e o cenário combinado (glob + shared + bibliography) do case study
+  Quinto Andar. Cada teste foi verificado falhando contra a versão anterior à
+  correção antes de ser aceito.
+- `tests/test_schema_builder.py` — nova classe `TestStrictModeConformance` (6
+  testes): `required == properties` para ITEM e SOURCE, campos `OPTIONAL`
+  aceitam `null`, campos `REQUIRED` continuam não-nulos, `minimum`/`maximum`
+  de SCALE sobrevivem à conversão nullable, e tratamento de `enum`/`const`
+  pelo novo `_nullable`.
+- `tests/test_ontology_mode.py` — nova classe `TestUpdatePreservesExistingEntries`:
+  simula `--update` com LLM mockado e confirma que entradas preexistentes no
+  `.syno` sobrevivem à escrita, com as novas anexadas.
+- Suíte completa antes/depois das quatro correções: 420 → 435 passed, 0
+  regressões (`_scope_object_schema` tem blast radius CRITICAL — 13 símbolos,
+  20 fluxos de execução, todos os modos de extração — confirmado sem
+  regressão pela suíte completa, não só pelos testes novos).
+- Validação ponta a ponta no projeto real (Quinto Andar / Dados_Lattes):
+  `synesis compile` foi de 9 erros + ~180 warnings para 0/0;
+  `ontology --update` (antes falhava com "nenhum código encontrado") gerou
+  59/59 códigos pendentes preservando as 74 entradas curadas (133 no total);
+  `dataset` (3 currículos, backend `openai`/OpenRouter) não apresentou mais
+  fallback para texto livre.
+
+### Testing
+
+- Codificação real de 3 currículos TOML do corpus Quinto Andar (backend
+  Anthropic, claude-sonnet-5, pt-BR): 3/3 `.syn` gerados corretamente.
+- `tests/test_dataset_mode.py` (offline — sem chamada de LLM/API; 7 testes ao
+  final desta versão, ver detalhamento abaixo).
+- Após a mudança de ancoragem: contexto serializado do `lattes.synt` verificado
+  idêntico ao anterior (105176 / 71343 / 175203 chars nos 3 currículos); suíte
+  offline relevante 97 passed.
+- Feedback de progresso: smoke test com `_generate_abstract_syn`/
+  `validate_and_fix_async` mockados (offline, sem chamada de LLM) exercitando
+  `_process_dataset_async` ponta a ponta — confirma ordem `[i/N]` correta e
+  ausência de duplicação com o log pré-existente de `parse_dataset_records`.
+  `tests/test_dataset_mode.py` 7 passed (2 novos, override de dataset).
+
+---
+
+## [0.7.7] — 2026-07-06
+
+### Fixed
+
+- **Bibref rejeitado em projetos sem bibliografia (`INCLUDE BIBLIOGRAPHY` ausente)** (`project_loader.py`)
+  - `assert_bibref_known()` tratava `bib_keys` vazio como erro de configuração incondicional ("verifique a diretiva INCLUDE BIBLIOGRAPHY"), mesmo quando o `.synp` legitimamente não declara bibliografia — caso do compilador `synesis` >= 0.6.0, que permite SOURCEs definidos exclusivamente pelo template (ex.: `lattes.synp`, cujo bibref é o ID Lattes, não uma chave `.bib`). Todo `document`/`item` contra esses projetos abortava antes de chamar o LLM.
+  - A validação agora distingue os dois casos: se o `.synp` não declara `INCLUDE BIBLIOGRAPHY`, o bibref é aceito sem checagem contra `.bib` (o compilador já teria abortado o `load_project()` se o projeto fosse inválido); se a diretiva está presente mas o `.bib` carregou zero chaves, o erro é mantido, com mensagem revisada apontando o arquivo `.bib` como a causa (antes apontava a diretiva ausente, que não é o caso).
+  - `synesis>=0.5.5` → `synesis>=0.6.0` em `pyproject.toml`, refletindo a dependência real desta capacidade.
+  - Testes: `TestAssertBibrefKnown` em `tests/test_item_mode.py` cobre os dois ramos nas condições de `bib_keys` vazio.
+
+---
+
+## [0.7.6] — 2026-07-06
+
+### Added
+
+- **Caminho JSON (Opção 3) no modo `ontology`** (`schema_builder.py`, `block_assembler.py`, `prompt_builder.py`, `modes/ontology_mode.py`)
+  - Até então o modo `ontology` só tinha o caminho de texto livre: o LLM escrevia o bloco `ONTOLOGY ... END ONTOLOGY` inteiro, incluindo a moldura estrutural (keyword, nomes de campo, `END`). Isso permitia alucinações de sintaxe — por exemplo, uma linha `ITEM <code> TYPE variable` dentro do bloco, que o compilador rejeita com "Token inesperado" e que corrompe o `.syno` inteiro no processamento subsequente.
+  - `build_ontology_schema(ctx, topics=...)`: gera o JSON Schema dos campos ONTOLOGY do template (`additionalProperties: false` elimina por construção qualquer chave fora de `ONTOLOGY FIELDS`); quando há tópicos existentes no projeto, o campo TOPIC vira `enum` restrito a eles.
+  - `assemble_ontology(ctx, code, data)`: monta o bloco `ONTOLOGY <code> ... END ONTOLOGY` a partir de valores JSON, reaproveitando `_assemble_block` (agora com o parâmetro `with_at`, default `True`, para preservar 100% o comportamento existente de SOURCE/ITEM que usam `@bibref`).
+  - `build_ontology_values_prompt`: prompt análogo ao do modo `abstract`, pedindo apenas os VALORES dos campos — o LLM nunca digita `ONTOLOGY`, `END ONTOLOGY` ou nomes de campo.
+  - `_generate_ontology_syno` (novo, em `ontology_mode.py`): espelha `_generate_abstract_syn` — usa o caminho JSON quando `supports_json_schema()` é `True`; cai para o texto livre existente em caso de falha ou SDK sem suporte (degradação graciosa idêntica à do modo `abstract`, ver [0.7.3]).
+  - **Testado sem custo de API**: montagem determinística do bloco a partir de valores simulados, incluindo chaves alucinadas (`item`, `type`) que o schema/assembler descartam por construção; bloco resultante validado com `synesis.load()` real sem erros.
+
+### Fixed
+
+- **Blocos ONTOLOGY que falham a validação eram gravados no `.syno`, corrompendo-o** (`modes/ontology_mode.py`)
+  - `_process_ontology_async` concatenava TODOS os resultados no `.syno` final, inclusive os que retornaram `success=False` (contendo o comentário `# ERRO: validação falhou após N tentativa(s)` seguido do texto malformado). Um único código mal-extraído corrompia o arquivo inteiro para qualquer `compile`/`load` posterior.
+  - Blocos com `success=False` agora são desviados para `<output>.syno.rejeitados` (mesmo diretório, sobrescrito a cada execução) em vez de entrar no `.syno`; o resumo da execução já reportava a contagem de falhas via "Falhas: N", agora complementado por um aviso de log apontando o arquivo de rejeitados.
+
+### Changed
+
+- **Testes de integração (API real) não são mais executados por padrão** (`pyproject.toml`)
+  - `pytest` sem flags rodava toda a suíte incluindo `@pytest.mark.integration` (`process_abstract`/`process_ontology` reais, consumindo tokens) sem aviso. Adicionado `addopts = "-m 'not integration'"`: agora esses testes só rodam com `pytest -m integration` explícito (e `ANTHROPIC_API_KEY` configurada). Suíte padrão: 423 testes coletados, 3 deselected.
+
+---
+
+## [0.7.5] — 2026-07-06
+
+### Fixed
+
+- **`load_project` falhava com `PermissionError` ao encontrar um diretório no lugar de um `.syn`/`.syno`/`.bib` referenciado por `INCLUDE`** (`project_loader.py`)
+  - `_collect_includes` checava apenas `file_path.exists()` antes de `read_text()`; um diretório homônimo (por exemplo, criado por engano ao confundir `--output` do comando `abstract` com nome de arquivo — ver [0.7.4]) também satisfaz `exists()`, levando a `read_text()` tentar abrir um diretório como arquivo. No Windows isso aparece como `PermissionError: [Errno 13] Permission denied` em vez de um erro claro.
+  - Troca para `file_path.is_file()`, que exclui diretórios: um `INCLUDE` cujo caminho aponta para uma pasta agora é silenciosamente ignorado (mesmo comportamento já existente para arquivo ausente), sem quebrar `load_project`.
+
+---
+
+## [0.7.4] — 2026-07-06
+
+### Fixed
+
+- **`abstract --output` confundido com nome de arquivo em vez de diretório** (`cli.py`, `modes/abstract_mode.py`)
+  - O comando `abstract` sempre tratou `--output` como diretório de saída (escreve `annotations.syn` ou `<bibref>.syn` dentro dele), mas o nome da flag e os exemplos do `--help` não deixavam essa distinção clara. Um usuário passando `--output abstracts.syn` (esperando um arquivo) fazia o comando criar uma **pasta** com esse nome; uma tentativa subsequente de abrir o mesmo caminho como arquivo falhava com `PermissionError: [Errno 13] Permission denied`, sem indicar a causa real.
+  - Flag renomeada para `--output-dir`, alinhando com o comando `normalize` que já usa esse nome para o mesmo conceito; `--output` mantido como alias retrocompatível. Help text agora diz explicitamente "a folder, not a file path". Exemplos do epílogo atualizados.
+  - `process_abstract` passa a validar o caminho antes de criar o diretório: se já existir como arquivo, falha cedo com `ValueError` explicando o conflito e sugerindo `--output-dir annotations`, em vez de deixar o erro estourar depois como `PermissionError` genérico.
+
+---
+
+## [0.7.3] — 2026-07-06
+
+### Added
+
+- **Caminho JSON (Opção 3) no backend Anthropic via structured outputs nativo** (`llm_client.py`, `runtime_info.py`, `pyproject.toml`, `.env.example`)
+  - Até então o "caminho JSON" (LLM devolve só VALORES conforme JSON Schema → `block_assembler` monta o bloco) existia apenas no backend `openai`-compatível; o backend `anthropic` sempre caía no caminho de texto-livre (regex). A API Anthropic lançou **structured outputs** (`output_config.format`), o equivalente nativo do `response_format` da OpenAI com constrained decoding.
+  - `supports_json_schema()` passa a retornar `True` para o backend `anthropic` **quando o SDK instalado suporta `output_config`** (via `_anthropic_sdk_supports_output_config()`, introspecção cacheada da assinatura). Em SDK anterior, retorna `False` → texto-livre → **comportamento idêntico ao anterior** (degradação graciosa).
+  - Novo `_sanitize_schema_for_anthropic()`: remove do schema enviado ao wire os keywords que o constrained decoding da Anthropic não aceita (`minimum`/`maximum`/`multipleOf`/`minLength`/`maxLength`/`pattern`/`exclusive*`). A garantia desses limites permanece no `validate_and_fix` (compilador Synesis), que roda sempre depois — nada é enfraquecido. O schema original (usado pelo backend OpenAI, que aceita esses keywords) é preservado intacto.
+  - Ramo `anthropic` de `_call_sync_inner`: quando `schema` é fornecido, monta `output_config={"format":{"type":"json_schema","schema": <saneado>}}`. Falha/refusal/truncamento → `call_json` cai no texto-livre (piso de segurança preservado em todos os cenários).
+  - **Sem mudança nos modos nem no assembler**: os 4 modos que usam o caminho JSON (`item`, `abstract`, `document`, `refine`) e o `block_assembler` são agnósticos ao backend — o contrato de dados (`dict` → assembler) é idêntico. A alteração se concentra em `llm_client.py`.
+  - **Floor do SDK**: `anthropic>=0.40.0` → `anthropic>=0.77.1` (versão que introduziu structured outputs; 0.77.1 corrigiu o beta header).
+  - `runtime_info`: banner mostra "JSON assembler" para anthropic com structured outputs; a dica de fallback passou a orientar a atualização do SDK (`anthropic>=0.77.1`) em vez de trocar de backend.
+  - **Testes**: novos casos para `_sanitize_schema_for_anthropic` (remoção recursiva, preservação de `enum`/`const`/`additionalProperties`, não-mutação do original), `supports_json_schema()` por backend (gate no SDK), e construção do `output_config` no ramo anthropic (mock da API). Corrigidos 3 testes pré-existentes de `test_runtime_info.py` que asseriam strings que a implementação não emitia.
+
+---
+
+## [0.7.2] — 2026-07-06
+
+### Fixed
+
+- **Chamada de crítica redundante no loop do modo `refine`** (`modes/refine_mode.py`)
+  - Cada iteração de `_refine_single_item` re-executava `_critique_tags` sobre o bloco `current` no início do loop, recomputando um score já obtido (o `initial_score` na 1ª iteração, ou o `cand_score` da iteração anterior nas seguintes) — uma chamada de LLM inteira desperdiçada por iteração.
+  - Agora as tags do critique mais recente (`current_tags`) são reaproveitadas como feedback de entrada da iteração seguinte. Reduz de até 7 para até 5 chamadas de LLM por ITEM com `max_iter=2`, sem alterar o resultado do loop (mesma lógica de não-regressão, ponto-fixo e trace).
+  - Testes de `test_refine_mode.py` ajustados: mocks de `critique_scores` que assumiam a chamada duplicada foram corrigidos para a sequência real de chamadas.
 
 ---
 

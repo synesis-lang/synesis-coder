@@ -13,6 +13,7 @@ from synesis.ast.nodes import FieldSpec, FieldType, OrderedValue, Scope
 
 from synesis_coder.project_loader import load_project
 from synesis_coder.schema_builder import (
+    _nullable,
     build_item_schema,
     build_source_schema,
     field_to_schema,
@@ -119,3 +120,66 @@ class TestBuildSchemasFromRealProject:
         assert schema["additionalProperties"] is False
         for req in ctx["required_source"]:
             assert req in schema["required"]
+
+
+class TestStrictModeConformance:
+    """Regressão: `required` deve listar TODA chave de `properties`.
+
+    O modo `strict` das structured outputs (OpenAI/Azure) recusa o schema com
+    HTTP 400 quando `required` é parcial — e o synesis-coder envia
+    `strict: True` fixo. O sintoma era degradação silenciosa para texto livre,
+    descartando enum/minimum/maximum derivados do template.
+    """
+
+    def _assert_strict_conformant(self, obj: dict) -> None:
+        props = set(obj["properties"])
+        required = set(obj.get("required", []))
+        assert props == required, f"faltando em required: {sorted(props - required)}"
+
+    def test_item_schema_required_covers_all_properties(self):
+        ctx = load_project(PROJECT_SOCIAL)
+        item_obj = build_item_schema(ctx)["properties"]["items"]["items"]
+        self._assert_strict_conformant(item_obj)
+
+    def test_source_schema_required_covers_all_properties(self):
+        ctx = load_project(PROJECT_SOCIAL)
+        self._assert_strict_conformant(build_source_schema(ctx))
+
+    def test_optional_fields_are_nullable(self):
+        """OPTIONAL vira tipo nullable — a opcionalidade não some do schema."""
+        ctx = load_project(PROJECT_SOCIAL)
+        item_obj = build_item_schema(ctx)["properties"]["items"]["items"]
+        optional = set(ctx["item_fields"]) - set(ctx["required_item"])
+        assert optional, "fixture precisa ter ao menos um campo OPTIONAL"
+        for name in optional:
+            frag = item_obj["properties"][name]
+            accepts_null = (
+                ("type" in frag and "null" in frag["type"])
+                or ("enum" in frag and None in frag["enum"])
+            )
+            assert accepts_null, f"campo OPTIONAL `{name}` não aceita null: {frag}"
+
+    def test_required_fields_stay_non_nullable(self):
+        """REQUIRED continua estrito — nullable só se aplica ao OPTIONAL."""
+        ctx = load_project(PROJECT_SOCIAL)
+        item_obj = build_item_schema(ctx)["properties"]["items"]["items"]
+        for name in ctx["required_item"]:
+            frag = item_obj["properties"][name]
+            if "type" in frag:
+                assert "null" not in frag["type"], f"REQUIRED `{name}` virou nullable"
+
+    def test_scale_bounds_survive_nullable(self):
+        """minimum/maximum de SCALE não podem se perder ao virar nullable."""
+        spec = FieldSpec(
+            name="score", type=FieldType.SCALE, scope=Scope.ITEM, format="[0..3]"
+        )
+        frag = _nullable(field_to_schema(spec))
+        assert frag["minimum"] == 0
+        assert frag["maximum"] == 3
+        assert "null" in frag["type"]
+
+    def test_nullable_handles_enum_and_const(self):
+        assert _nullable({"enum": ["A", "B"]}) == {"enum": ["A", "B", None]}
+        assert _nullable({"const": "__untyped__"}) == {
+            "enum": ["__untyped__", None]
+        }

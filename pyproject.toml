@@ -1,10 +1,36 @@
 [project]
 name = "synesis-coder"
-version = "0.7.1"
+version = "0.8.0"
+description = "LLM-assisted annotation pipeline for the Synesis ecosystem"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"
+license-files = ["LICENSE", "LICENSE.exception"]
+authors = [
+    {name = "De Britto, Christian Maciel", email = "chriseana@gmail.com"}
+]
+keywords = [
+    "synesis",
+    "llm",
+    "annotation",
+    "knowledge-engineering",
+    "qualitative-research",
+    "ontology",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Linguistic",
+    "Operating System :: OS Independent",
+]
 dependencies = [
-    "synesis>=0.5.5",
-    "anthropic>=0.40.0",
+    "synesis>=0.10.0",
+    "anthropic>=0.77.1",
     "openai>=1.0",
     "click>=8.0",
     "tenacity>=8.0",
@@ -13,7 +39,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff==0.15.17", "mypy==1.16.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "build>=0.10",
+    "pyyaml>=6.0",
+    "tomli>=2.0 ; python_version < '3.11'",
+    "ruff==0.16.1",
+    "mypy==2.3.0",
+]
+
+[project.urls]
+Repository = "https://github.com/synesis-lang/synesis-coder"
+Changelog = "https://github.com/synesis-lang/synesis-coder/blob/main/CHANGELOG.md"
 
 [project.scripts]
 synesis-coder = "synesis_coder.cli:main"
@@ -22,11 +60,14 @@ synesis-coder = "synesis_coder.cli:main"
 include = ["synesis_coder*"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Por padrão, exclui testes de integração — eles gastam tokens de API real.
+# Para rodá-los explicitamente: pytest -m integration (requer ANTHROPIC_API_KEY).
+addopts = "-m 'not integration'"
 markers = [
     "integration: testes que chamam a API LLM real (requerem ANTHROPIC_API_KEY)",
 ]

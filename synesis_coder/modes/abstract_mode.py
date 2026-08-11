@@ -25,12 +25,17 @@ from typing import Dict, List, Optional, Tuple
 
 import bibtexparser
 
-from synesis_coder.block_assembler import assemble_items, assemble_source
+from synesis_coder.block_assembler import (
+    assemble_items,
+    assemble_source,
+    count_item_blocks,
+    dedupe_item_blocks,
+)
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_abstract_prompt, build_abstract_values_prompt
-from synesis_coder.runtime_info import runtime_banner
+from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
 from synesis_coder.schema_builder import build_abstract_schema
 from synesis_coder.validator import validate_and_fix_async
 
@@ -117,10 +122,21 @@ async def _generate_abstract_syn(
         data = await llm_client.call_json_async(
             messages, schema, temperature=0.0, context=context
         )
-        if data is not None and "source" in data and "items" in data:
-            source_block = assemble_source(ctx, bibref, data["source"])
-            items_block = assemble_items(ctx, bibref, data)
-            return source_block + "\n\n" + items_block
+        if data is not None:
+            if "source" in data and "items" in data:
+                source_block = assemble_source(ctx, bibref, data["source"])
+                items_block = assemble_items(ctx, bibref, data)
+                return source_block + "\n\n" + items_block
+            # JSON válido, mas sem o envelope que este modo exige. Sem este
+            # registro a queda para texto livre seria invisível: `call_json`
+            # devolveu um dict (não contabilizou fallback) e o bloco resultante
+            # sai válido, marcado OK, porém sem as garantias do schema.
+            logger.warning(
+                "%s: resposta JSON sem as chaves 'source'/'items' (recebido: "
+                "%s) — gerando em TEXTO LIVRE, sem as garantias do schema.",
+                bibref, sorted(data.keys())[:5],
+            )
+            llm_client.usage.record_schema_fallback()
 
     messages = build_abstract_prompt(ctx, bibref, abstract)
     return await llm_client.call_async(messages, temperature=0.0, context=context)
@@ -170,6 +186,23 @@ async def _process_one_abstract(
             raw_syn, ctx, llm_client, annotation_key=annotation_key,
             recorder=llm_client.recorder, context=context,
         )
+
+        # Loop degenerativo: modelos fracos re-emitem o mesmo ITEM até esgotar
+        # tokens. Sintaticamente válido, logo invisível ao compilador.
+        final_syn, dupes = dedupe_item_blocks(final_syn)
+        if dupes:
+            logger.warning(
+                "%s: %d bloco(s) ITEM duplicado(s) removido(s) — possível "
+                "loop degenerativo do modelo.", bibref, dupes,
+            )
+
+        # Cobertura: a validação garante SINTAXE, não que algo foi anotado.
+        if success and count_item_blocks(final_syn) == 0:
+            success = False
+            logger.error(
+                "%s: nenhum bloco ITEM gerado — o registro não produziu "
+                "anotação alguma (o .syn contém apenas SOURCE).", bibref,
+            )
 
         if llm_client.recorder is not None:
             corrections = sum(
@@ -280,6 +313,7 @@ def process_abstract(
     model: str | None = None,
     format: str = "plain",
     debug: bool = False,
+    prompt_only: bool = False,
 ) -> str:
     """Processa corpus .bib em lote, gerando anotações Synesis (.syn).
 
@@ -295,10 +329,29 @@ def process_abstract(
         format: "plain" ou "verbose".
         debug: Se True, gera um relatório Markdown de auditoria do pipeline LLM
             no diretório de saída (<projeto>_abstract_debug.md).
+        prompt_only: Se True, retorna o prompt montado em Markdown e não chama
+            o LLM (nenhum arquivo é escrito).
 
     Returns:
-        String com resumo da execução.
+        String com resumo da execução, ou o prompt em Markdown quando
+        prompt_only=True.
     """
+    if prompt_only:
+        from synesis_coder.prompt_dump import dump_prompt
+
+        entries = parse_bib_entries(bib_path)
+        first = entries[0]
+        # Anotações desatualizadas em relação ao template não devem impedir a
+        # inspeção do prompt: revisar as GUIDELINES é justamente o que se faz
+        # ENQUANTO o template muda e o corpus antigo ainda não foi migrado.
+        ctx = load_project(
+            project_path, load_annotations=True, tolerate_annotation_errors=True
+        )
+        return dump_prompt(
+            ctx, mode="abstract",
+            bibref=first["bibref"], text=first["abstract"],
+        )
+
     return asyncio.run(
         _process_abstract_async(
             project_path, bib_path, output_dir,
@@ -326,6 +379,12 @@ async def _process_abstract_async(
 
     # 2. Criar diretório de saída
     output_dir = Path(output_dir).resolve()
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(
+            f"'{output_dir}' já existe como arquivo, mas este comando espera um "
+            f"diretório de saída (os .syn são escritos dentro dele). "
+            f"Aponte --output-dir para uma pasta, ex.: --output-dir annotations"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. Inicializar LLM client (com recorder de debug se solicitado)
@@ -393,6 +452,10 @@ async def _process_abstract_async(
 
     elapsed = time.monotonic() - start_time
     rate = (total_ok / total * 100) if total > 0 else 0
+
+    # Degradação silenciosa: registros que caíram para texto livre contam como
+    # OK, mas rodaram sem as restrições do schema. Avisar antes do resumo.
+    warn_schema_fallbacks(llm_client)
 
     _sep = "-" * 50
     summary = (

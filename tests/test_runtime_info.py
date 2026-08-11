@@ -25,12 +25,11 @@ class _FakeClient:
         return self._json
 
 
-def test_banner_contains_all_four_infos():
+def test_banner_contains_backend_model_and_path():
     line = build_banner_line(_FakeClient("anthropic", "claude-opus-4-6", False))
-    assert "synesis-coder" in line
-    assert "compilador synesis" in line
     assert "anthropic/claude-opus-4-6" in line
-    assert "caminho:" in line
+    # O rótulo do caminho (JSON assembler | texto-livre) sempre está presente.
+    assert "texto-livre" in line or "JSON assembler" in line
 
 
 def test_label_free_text_when_no_json_schema():
@@ -41,27 +40,41 @@ def test_label_free_text_when_no_json_schema():
 
 def test_label_json_assembler_when_supported():
     line = build_banner_line(_FakeClient("openai", "gemma", True))
-    assert "JSON assembler (determinístico)" in line
+    assert "JSON assembler" in line
     assert "texto-livre" not in line
 
 
+def test_label_json_assembler_for_anthropic_with_structured_outputs():
+    # Anthropic com SDK que suporta structured outputs: caminho JSON, sem dica.
+    line = build_banner_line(_FakeClient("anthropic", "claude-sonnet-5", True))
+    assert "JSON assembler" in line
+    assert "SYNESIS_CODER_BACKEND=openai" not in line
+
+
 def test_hint_only_for_anthropic_free_text():
+    # Anthropic em texto-livre (SDK antigo): dica para atualizar o SDK.
     anthropic_line = build_banner_line(_FakeClient("anthropic", "m", False))
-    assert "SYNESIS_CODER_BACKEND=openai" in anthropic_line
+    assert "anthropic>=0.77.1" in anthropic_line
 
     # openai com json ativo: sem dica
     openai_line = build_banner_line(_FakeClient("openai", "m", True))
-    assert "SYNESIS_CODER_BACKEND=openai" not in openai_line
+    assert "anthropic>=0.77.1" not in openai_line
+
+
+def test_no_hint_for_anthropic_with_json():
+    # Anthropic com structured outputs disponível: nenhuma dica de atualização.
+    line = build_banner_line(_FakeClient("anthropic", "claude-sonnet-5", True))
+    assert "anthropic>=0.77.1" not in line
 
 
 def test_no_hint_for_non_anthropic_without_json():
     # Backend openai-compat que (hipoteticamente) não suporta json_schema:
-    # a dica de trocar para openai não se aplica.
+    # a dica de atualizar o SDK anthropic não se aplica.
     line = build_banner_line(_FakeClient("openai", "m", False))
-    assert "SYNESIS_CODER_BACKEND=openai" not in line
+    assert "anthropic>=0.77.1" not in line
 
 
 def test_runtime_banner_emits_via_logger(caplog):
     with caplog.at_level(logging.INFO, logger=runtime_info.__name__):
         runtime_banner(_FakeClient("anthropic", "claude-opus-4-6", False))
-    assert any("caminho:" in rec.message for rec in caplog.records)
+    assert any("Motor:" in rec.message for rec in caplog.records)

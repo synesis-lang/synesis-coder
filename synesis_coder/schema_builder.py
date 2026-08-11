@@ -97,18 +97,112 @@ def build_source_schema(ctx: dict) -> dict:
     return _scope_object_schema(ctx["source_fields"], ctx.get("required_source", []))
 
 
+def build_ontology_schema(ctx: dict, topics: Optional[list] = None) -> dict:
+    """Monta o JSON Schema de um único objeto-ONTOLOGY (modo ontology).
+
+    O LLM preenche apenas os VALORES dos campos declarados em ONTOLOGY FIELDS
+    (ex.: ontology_description, topic); a moldura `ONTOLOGY <code> ... END
+    ONTOLOGY` é responsabilidade do block_assembler. `additionalProperties:
+    false` impede que chaves alucinadas (ex.: um "item"/"type" espúrio) cheguem
+    ao assembler, eliminando por construção a classe de erro de sintaxe que o
+    caminho de texto livre permitia.
+
+    Quando `topics` é fornecido e o template tem um campo TOPIC, esse campo é
+    restringido por `enum` aos tópicos já existentes no projeto — reforço extra
+    contra tópico inválido (o LLM não pode inventar categoria fora do conjunto).
+    """
+    fields = ctx.get("ontology_fields", {})
+    required = ctx.get("required_ontology", [])
+    schema = _scope_object_schema(fields, required)
+
+    if topics:
+        for name, spec in fields.items():
+            if spec.type == FieldType.TOPIC:
+                schema["properties"][name] = {"enum": sorted(set(topics))}
+                break
+
+    return schema
+
+
+def _nullable(fragment: dict) -> dict:
+    """Torna um fragmento de schema aceitável como `null` além do seu tipo.
+
+    Necessário porque o modo `strict` das structured outputs (OpenAI/Azure)
+    exige que TODA chave de `properties` conste em `required`; a opcionalidade
+    de um campo do template passa a ser expressa pelo tipo nullable, não pela
+    ausência em `required` (ver `_scope_object_schema`).
+
+    As três formas produzidas por `field_to_schema` são tratadas:
+    - `{"type": T}`        -> `{"type": [T, "null"]}`
+    - `{"enum": [...]}`    -> acrescenta `None` ao enum
+    - `{"const": V}`       -> vira `{"enum": [V, None]}` (const não aceita união)
+    """
+    out = dict(fragment)
+
+    if "type" in out:
+        t = out["type"]
+        if isinstance(t, list):
+            if "null" not in t:
+                out["type"] = [*t, "null"]
+        elif t != "null":
+            out["type"] = [t, "null"]
+        return out
+
+    if "enum" in out:
+        values = list(out["enum"])
+        if None not in values:
+            values.append(None)
+        out["enum"] = values
+        return out
+
+    if "const" in out:
+        return {"enum": [out["const"], None]}
+
+    return out
+
+
 def _scope_object_schema(fields: dict, required: list) -> dict:
-    """Constrói o schema de um objeto (ITEM ou SOURCE) a partir dos seus campos."""
-    properties = {name: field_to_schema(spec) for name, spec in fields.items()}
-    required_present = [name for name in required if name in fields]
+    """Constrói o schema de um objeto (ITEM ou SOURCE) a partir dos seus campos.
+
+    Campos com origem-de-valor externa (ON BIBLIOGRAPHY / ON DATASET) são
+    EXCLUÍDOS do schema: o compilador os resolve do .bib/TOML, então o LLM não
+    deve gerá-los (evita valores fabricados p/ campos vazios na fonte).
+
+    CONFORMIDADE COM `strict` (structured outputs): provedores OpenAI/Azure
+    recusam o schema com HTTP 400 quando `required` não inclui todas as chaves
+    de `properties` ("'required' is required to be supplied and to be an array
+    including every key in properties"). Como `llm_client` envia `strict: True`,
+    TODOS os campos entram em `required`; os que o template declara OPTIONAL
+    são marcados como nullable (`_nullable`), preservando a semântica de
+    "pode não vir" sem violar a spec. O assembler já descarta valores None,
+    então um campo opcional omitido pelo modelo continua ausente no bloco .syn.
+
+    Sem isso o caminho JSON falhava e caía silenciosamente para texto livre,
+    descartando as restrições estruturais derivadas do template (enum de
+    ENUMERATED/ORDERED, minimum/maximum de SCALE, enum de relações de CHAIN,
+    additionalProperties=false) — justamente as garantias que este módulo
+    existe para dar.
+    """
+    gen_fields = {
+        name: spec
+        for name, spec in fields.items()
+        if getattr(spec, "value_origin", "document") not in ("bibliography", "dataset")
+    }
+    required_set = {name for name in required if name in gen_fields}
+
+    properties: dict = {}
+    for name, spec in gen_fields.items():
+        fragment = field_to_schema(spec)
+        properties[name] = fragment if name in required_set else _nullable(fragment)
 
     schema: dict = {
         "type": "object",
         "properties": properties,
         "additionalProperties": False,
     }
-    if required_present:
-        schema["required"] = required_present
+    if properties:
+        # Ordem estável e determinística: segue a ordem dos campos do template.
+        schema["required"] = list(properties.keys())
     return schema
 
 

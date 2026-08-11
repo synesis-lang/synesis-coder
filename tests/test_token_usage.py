@@ -80,15 +80,81 @@ class TestTokenUsageSummaryLine:
         assert "calls 0" in line
 
 
+class TestTokenUsageCache:
+    """Acumulacao e exibicao de metricas de prompt caching."""
+
+    def test_cache_kwargs_default_to_zero(self):
+        """Chamadores que nao informam cache continuam funcionando (compat)."""
+        u = TokenUsage()
+        u.record(1000, 200)
+
+        assert u.cache_write_tokens == 0
+        assert u.cache_read_tokens == 0
+
+    def test_cache_tokens_accumulate(self):
+        """cache_write/cache_read somam ao longo das chamadas."""
+        u = TokenUsage()
+        u.record(100, 50, cache_write_tok=4000, cache_read_tok=0)
+        u.record(80, 40, cache_write_tok=0, cache_read_tok=4000)
+        u.record(80, 40, cache_write_tok=0, cache_read_tok=4000)
+
+        assert u.cache_write_tokens == 4000
+        assert u.cache_read_tokens == 8000
+
+    def test_anthropic_total_sums_cache_fields(self):
+        """Anthropic: input_tokens exclui cache, entao o total soma os tres."""
+        u = TokenUsage()
+        u.record(100, 50, cache_write_tok=0, cache_read_tok=4000,
+                 input_excludes_cache=True)
+
+        assert u.total_prompt_tokens == 4100
+        assert u.total_tokens == 4150
+
+    def test_openai_total_does_not_double_count(self):
+        """OpenAI-compat: prompt_tokens ja e o total; cache nao soma de novo."""
+        u = TokenUsage()
+        u.record(4100, 50, cache_read_tok=4000)  # sem input_excludes_cache
+
+        assert u.total_prompt_tokens == 4100
+        assert u.total_tokens == 4150
+
+    def test_summary_line_omits_cache_when_absent(self):
+        """Sem atividade de cache a linha permanece enxuta."""
+        u = TokenUsage()
+        u.record(1000, 200)
+
+        assert "cache" not in u.summary_line()
+
+    def test_summary_line_shows_cache_when_present(self):
+        """Com atividade de cache o segmento aparece."""
+        u = TokenUsage()
+        u.record(100, 50, cache_write_tok=1200, cache_read_tok=3400,
+                 input_excludes_cache=True)
+        line = u.summary_line()
+
+        assert "cache w 1,200/r 3,400" in line
+
+    def test_summary_line_shows_cache_with_only_reads(self):
+        """Cache read sem write (prefixo ja quente) tambem exibe."""
+        u = TokenUsage()
+        u.record(100, 50, cache_read_tok=4000, input_excludes_cache=True)
+
+        assert "cache w 0/r 4,000" in u.summary_line()
+
+
 class TestTokenUsageReset:
     def test_reset_zeroes_all_fields(self):
         """reset() zera todos os contadores."""
         u = TokenUsage()
-        u.record(1000, 200, is_correction=True)
+        u.record(1000, 200, is_correction=True,
+                 cache_write_tok=500, cache_read_tok=300,
+                 input_excludes_cache=True)
         u.reset()
 
         assert u.input_tokens == 0
         assert u.output_tokens == 0
+        assert u.cache_write_tokens == 0
+        assert u.cache_read_tokens == 0
         assert u.api_calls == 0
         assert u.corrections == 0
         assert u.total_tokens == 0
@@ -218,3 +284,108 @@ class TestLLMClientCorrectionFlag:
         # Todas as 5 chamadas devem ser marcadas como correcao
         assert client.usage.api_calls == 5
         assert client.usage.corrections == 5
+
+
+# ---------------------------------------------------------------------------
+# Leitura das metricas de cache nos dois backends
+# ---------------------------------------------------------------------------
+
+
+class TestCacheMetricsCapture:
+    """Verifica que os campos de cache sao lidos da resposta de cada backend."""
+
+    def _make_anthropic_client(self):
+        from synesis_coder.llm_client import LLMClient
+
+        with patch("synesis_coder.llm_client._get_anthropic_api_key", return_value="test-key"):
+            client = LLMClient(model="claude-sonnet-4-6", backend="anthropic")
+        client._client = MagicMock()
+        client._rate_limit_enabled = False
+        return client
+
+    def test_anthropic_reads_cache_fields(self):
+        """Branch Anthropic captura cache_creation/cache_read_input_tokens."""
+        client = self._make_anthropic_client()
+        response = _make_mock_anthropic_response(120, 60)
+        response.usage = SimpleNamespace(
+            input_tokens=120,
+            output_tokens=60,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=4096,
+        )
+        client._client.messages.create.return_value = response
+
+        client.call([{"role": "user", "content": "x", "cache": False}])
+
+        assert client.usage.cache_read_tokens == 4096
+        assert client.usage.cache_write_tokens == 0
+        # input_tokens da Anthropic exclui cache -> total soma os dois
+        assert client.usage.total_prompt_tokens == 120 + 4096
+
+    def test_anthropic_usage_without_cache_fields_is_safe(self):
+        """Usage sem os campos de cache (MagicMock) nao quebra nem polui."""
+        client = self._make_anthropic_client()
+        # _make_mock_anthropic_response usa MagicMock: getattr devolveria um
+        # MagicMock, nao 0 — o helper _int_attr precisa coagir para int.
+        client._client.messages.create.return_value = _make_mock_anthropic_response(500, 100)
+
+        client.call([{"role": "user", "content": "x", "cache": False}])
+
+        assert client.usage.cache_write_tokens == 0
+        assert client.usage.cache_read_tokens == 0
+        assert client.usage.total_tokens == 600
+
+    def test_openai_reads_prompt_tokens_details(self):
+        """Branch OpenAI captura prompt_tokens_details.cached_tokens."""
+        from synesis_coder.llm_client import LLMClient
+
+        with patch("synesis_coder.llm_client._get_api_url", return_value="http://x"), \
+             patch("synesis_coder.llm_client._get_api_key", return_value="key"):
+            client = LLMClient(model="gpt-5.6-luna", backend="openai")
+        client._client = MagicMock()
+        client._rate_limit_enabled = False
+
+        choice = SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content="ITEM @r\nEND ITEM"),
+        )
+        client._client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[choice],
+            usage=SimpleNamespace(
+                prompt_tokens=5000,
+                completion_tokens=120,
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=4096, cache_write_tokens=0,
+                ),
+            ),
+        )
+
+        client.call([{"role": "user", "content": "x", "cache": False}])
+
+        assert client.usage.cache_read_tokens == 4096
+        # prompt_tokens ja e o total -> nao pode dobrar a contagem
+        assert client.usage.total_prompt_tokens == 5000
+
+    def test_openai_without_details_is_safe(self):
+        """Provedor que nao preenche prompt_tokens_details nao quebra."""
+        from synesis_coder.llm_client import LLMClient
+
+        with patch("synesis_coder.llm_client._get_api_url", return_value="http://x"), \
+             patch("synesis_coder.llm_client._get_api_key", return_value="key"):
+            client = LLMClient(model="some-model", backend="openai")
+        client._client = MagicMock()
+        client._rate_limit_enabled = False
+
+        choice = SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content="ok"),
+        )
+        client._client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[choice],
+            usage=SimpleNamespace(prompt_tokens=300, completion_tokens=40),
+        )
+
+        client.call([{"role": "user", "content": "x", "cache": False}])
+
+        assert client.usage.cache_read_tokens == 0
+        assert client.usage.total_prompt_tokens == 300

@@ -381,6 +381,7 @@ class TestSynrCompilerCompatibility:
         """Criar .synr sem revisões a partir de conteúdo .syn mínimo e compilar."""
         try:
             import synesis
+
             from synesis_coder.project_loader import load_project
         except ImportError:
             pytest.skip("synesis ou project_loader não disponível")
@@ -417,6 +418,7 @@ class TestSynrCompilerCompatibility:
         """Criar .synr com blocos REVISION e verificar que compila."""
         try:
             import synesis
+
             from synesis_coder.project_loader import load_project
         except ImportError:
             pytest.skip("synesis ou project_loader não disponível")

@@ -6,7 +6,6 @@ não chamam o LLM. Testes de integração requerem ANTHROPIC_API_KEY.
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -24,11 +23,13 @@ CASES_DIR = Path("d:/GitHub/case-studies")
 PROJECT_SOCIAL = CASES_DIR / "Sociology/Social_Acceptance/social_acceptance.synp"
 PROJECT_AIDS = CASES_DIR / "Sociology/iramuteq_aids_corpus/aids_corpus.synp"
 
-HAS_API_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-requires_api_key = pytest.mark.skipif(
-    not HAS_API_KEY, reason="ANTHROPIC_API_KEY não disponível"
-)
+# `integration` marca chamada real de API — deselecionado por padrão via
+# addopts em pyproject.toml (`-m 'not integration'`).
+#
+# A ausência de credencial é tratada em `tests/conftest.py`, não aqui: um
+# `skipif` neste ponto seria avaliado no import, logo após `load_dotenv()`,
+# e portanto NUNCA dispararia em máquina com `.env` — era inerte.
+requires_api_key = pytest.mark.integration
 
 # Texto de entrevista simulada para testes
 SAMPLE_INTERVIEW = """\
@@ -285,7 +286,7 @@ class TestSplitByHeaders:
 
     def test_semantic_dispatch_activated_for_structured_doc(self):
         """Documento com ≥2 headers deve usar o modo semântico."""
-        from synesis_coder.modes.document_mode import split_into_chunks, _has_markdown_structure
+        from synesis_coder.modes.document_mode import _has_markdown_structure, split_into_chunks
 
         assert _has_markdown_structure(SAMPLE_MARKDOWN) is True
         # Reduzir chunk_size para forçar múltiplos chunks
@@ -405,6 +406,7 @@ class TestExtractSourceBlock:
     @staticmethod
     def _extract(raw: str):
         import re
+
         from synesis_coder.modes.document_mode import _dedent_block
         m = re.search(
             r"^[ \t]*SOURCE[ \t]+@\S+.*?^[ \t]*END[ \t]+SOURCE",
@@ -490,6 +492,7 @@ class TestPatchRequiredSourceFields:
     def test_patched_source_compiles(self):
         """Bloco corrigido deve compilar sem erro de indentação nem campo ausente."""
         import synesis
+
         from synesis_coder.modes.document_mode import _patch_required_source_fields
 
         template = """\
@@ -658,6 +661,7 @@ class TestDocumentModeIntegration:
     def test_process_document_social_acceptance(self):
         """Deve processar documento e gerar .syn válido para social_acceptance."""
         import synesis
+
         from synesis_coder.modes.document_mode import process_document
         from synesis_coder.project_loader import load_project
         from synesis_coder.validator import _has_structural_errors

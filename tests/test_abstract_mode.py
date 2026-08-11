@@ -8,7 +8,6 @@ Testes de integração requerem ANTHROPIC_API_KEY no ambiente.
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -31,11 +30,13 @@ PROJECT_AIDS = CASES_DIR / "Sociology/iramuteq_aids_corpus/aids_corpus.synp"
 
 PROJECT_THOMPSON = CASES_DIR / "Theology/Thompson_Chain_Reference/thompson_bible.synp"
 
-HAS_API_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-requires_api_key = pytest.mark.skipif(
-    not HAS_API_KEY, reason="ANTHROPIC_API_KEY não disponível"
-)
+# `integration` marca chamada real de API — deselecionado por padrão via
+# addopts em pyproject.toml (`-m 'not integration'`).
+#
+# A ausência de credencial é tratada em `tests/conftest.py`, não aqui: um
+# `skipif` neste ponto seria avaliado no import, logo após `load_dotenv()`,
+# e portanto NUNCA dispararia em máquina com `.env` — era inerte.
+requires_api_key = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +402,78 @@ class TestAbstractValuesPrompt:
             assert field_name in system
 
 
+class TestMalformedEnvelopeIsReported:
+    """JSON válido mas sem 'source'/'items' é degradação — precisa ser visível.
+
+    `call_json` só garante que o retorno é um dict; a forma do envelope é
+    contrato deste modo. Sem o registro explícito, a queda para texto livre
+    ficava invisível: nenhum contador subia e o bloco resultante saía válido
+    e marcado OK, porém sem as garantias do schema.
+    """
+
+    def _ctx_and_client(self, envelope: dict):
+        from unittest.mock import MagicMock
+
+        from synesis_coder.project_loader import load_project
+        from synesis_coder.token_usage import TokenUsage
+
+        ctx = load_project(PROJECT_SOCIAL)
+        client = MagicMock()
+        client.usage = TokenUsage()
+        client.recorder = None
+        client.supports_json_schema.return_value = True
+
+        async def _call_json_async(*args, **kwargs):
+            return envelope
+
+        async def _call_async(*args, **kwargs):
+            return "ITEM @abdin2024\n  text: fallback\nEND ITEM"
+
+        client.call_json_async = _call_json_async
+        client.call_async = _call_async
+        return ctx, client
+
+    def test_missing_keys_records_schema_fallback(self):
+        import asyncio
+
+        from synesis_coder.modes.abstract_mode import _generate_abstract_syn
+
+        ctx, client = self._ctx_and_client({"unexpected": []})
+        asyncio.run(
+            _generate_abstract_syn(ctx, "abdin2024", "text", client, ("entry", 0, 1))
+        )
+
+        assert client.usage.schema_fallbacks == 1
+
+    def test_falls_back_to_free_text(self):
+        import asyncio
+
+        from synesis_coder.modes.abstract_mode import _generate_abstract_syn
+
+        ctx, client = self._ctx_and_client({"unexpected": []})
+        out = asyncio.run(
+            _generate_abstract_syn(ctx, "abdin2024", "text", client, ("entry", 0, 1))
+        )
+
+        assert "fallback" in out
+
+    def test_valid_envelope_records_no_fallback(self):
+        import asyncio
+
+        from synesis_coder.modes.abstract_mode import _generate_abstract_syn
+
+        ctx, client = self._ctx_and_client({
+            "source": {"description": "d", "epistemic_model": "e", "method": "m"},
+            "items": [{"text": "t"}],
+        })
+        out = asyncio.run(
+            _generate_abstract_syn(ctx, "abdin2024", "text", client, ("entry", 0, 1))
+        )
+
+        assert client.usage.schema_fallbacks == 0
+        assert "SOURCE @abdin2024" in out
+
+
 class TestAssembleAbstractFromData:
     """Testa o assembler com dados sintéticos no formato do caminho JSON abstract."""
 
@@ -467,6 +540,7 @@ class TestAbstractModeIntegration:
     def test_single_abstract_compiles(self):
         """Output para um abstract do social_acceptance deve compilar."""
         import asyncio
+
         from synesis_coder.llm_client import LLMClient
         from synesis_coder.project_loader import load_project
         from synesis_coder.prompt_builder import build_abstract_prompt

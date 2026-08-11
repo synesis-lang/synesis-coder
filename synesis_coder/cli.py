@@ -129,6 +129,25 @@ def _configure_logging(verbose: int, quiet: int, print_header: bool = False) -> 
         print_product_header(quiet=quiet)
 
 
+def _emit_prompt(markdown: str, project: Path, mode: str, output: Path | None) -> None:
+    """Grava o dump de prompt em disco e reporta o destino.
+
+    Escrever em arquivo — em vez de stdout — é o padrão porque o artefato é
+    para leitura e revisão: o prompt do face85 passa de 400 linhas, tamanho em
+    que rolar o terminal não serve. `--output` escolhe o caminho; sem ele o
+    nome deriva do projeto e do modo, ao lado do `.synp`.
+
+    O destino vai a stderr por escrita direta, não pelo logger: `-q` eleva o
+    nível para WARNING e engoliria um `log(22)` (DEST), deixando o usuário sem
+    saber onde o arquivo foi parar — e `-q` é justamente o que se usa aqui para
+    calar o banner. Sendo stderr, não interfere se stdout for redirecionado.
+    """
+    path = Path(output) if output else project.parent / f"{project.stem}_{mode}_prompt.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    sys.stderr.write(f"{path}\n")
+
+
 # ---------------------------------------------------------------------------
 # Help principal (Progressive Disclosure)
 # ---------------------------------------------------------------------------
@@ -154,12 +173,13 @@ def _build_main_help() -> str:
 
     groups = [
         ("Ingestion & Extraction", [
-            ("item",        "Generates an ITEM block from text and a bibref"),
-            ("abstract",    "Processes a .bib corpus in batch (SOURCE + ITEMs)  [--debug]"),
-            ("document",    "Processes a long document (.txt/.md) with automatic chunking  [--debug]"),
+            ("item",        "Generates an ITEM block from text and a bibref  [--prompt-only]"),
+            ("abstract",    "Processes a .bib corpus in batch (SOURCE + ITEMs)  [--debug] [--prompt-only]"),
+            ("document",    "Processes a long document (.txt/.md) with automatic chunking  [--debug] [--prompt-only]"),
+            ("dataset",     "Processes a TOML dataset corpus (SOURCE + ITEMs per record)"),
         ]),
         ("Structuring & LLM", [
-            ("ontology",    "Generates ONTOLOGY entries (.syno) from the annotated corpus"),
+            ("ontology",    "Generates ONTOLOGY entries (.syno) from the annotated corpus  [--prompt-only]"),
             ("suggest",     "Suggests relevant codes for a text excerpt"),
             ("finetune",    "Enriches an Alpaca dataset via LLM for fine-tuning"),
         ]),
@@ -199,12 +219,18 @@ def _build_main_help() -> str:
         _render_group(label, rows) for label, rows in groups
     )
 
+    notes = _c(
+        "  [--prompt-only]  Writes the assembled prompt (template GUIDELINES included)\n"
+        "                   to a Markdown file and exits. No LLM call, no tokens spent.",
+        fg="bright_black",
+    )
+
     hint = _c(
         "Run 'synesis-coder COMMAND --help' for options and examples of each mode.",
         fg="bright_black",
     )
 
-    return "\n\n".join([title, desc, usage, options, commands, hint]) + "\n"
+    return "\n\n".join([title, desc, usage, options, commands, notes, hint]) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +253,7 @@ def _ex(*lines: str) -> str:
                     result.append(_c(tok, fg="green", bold=True))
                 elif re.match(r"^--[\w-]+=?", tok):
                     result.append(_c(tok, fg="cyan"))
-                elif tok in ("item", "abstract", "document", "ontology",
+                elif tok in ("item", "abstract", "document", "dataset", "ontology",
                              "suggest", "finetune", "critique", "normalize",
                              "incorporate", "refine"):
                     result.append(_c(tok, fg="green"))
@@ -250,18 +276,24 @@ _EPILOG_ITEM = _ex(
     "",
     "  # Output in Portuguese:",
     '  synesis-coder item --project p.synp --bibref smith2024 --text "..." --language pt-BR',
+    "",
+    "  # Inspect the assembled prompt without calling the LLM (writes a .md):",
+    '  synesis-coder item --project p.synp --bibref smith2024 --text "..." --prompt-only',
 )
 
 _EPILOG_ABSTRACT = _ex(
     "",
     "  # Process all abstracts from a .bib corpus:",
-    "  synesis-coder abstract --project project.synp --input refs.bib --output annotations/",
+    "  synesis-coder abstract --project project.synp --input refs.bib --output-dir annotations/",
     "",
     "  # One .syn file per reference:",
-    "  synesis-coder abstract --project p.synp --input refs.bib --output annotations/ --per-reference",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir annotations/ --per-reference",
     "",
     "  # Control concurrency and batch size:",
-    "  synesis-coder abstract --project p.synp --input refs.bib --output annotations/ --concurrent 3 --batch-size 10",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir annotations/ --concurrent 3 --batch-size 10",
+    "",
+    "  # Inspect the assembled prompt without calling the LLM (review the template GUIDELINES):",
+    "  synesis-coder abstract --project p.synp --input refs.bib --prompt-only",
 )
 
 _EPILOG_DOCUMENT = _ex(
@@ -274,6 +306,23 @@ _EPILOG_DOCUMENT = _ex(
     "",
     "  # Control concurrency:",
     "  synesis-coder document --project p.synp --bibref E02 --input E02.txt --output E02.syn --concurrent 2",
+    "",
+    "  # Inspect the assembled prompt (first chunk) without calling the LLM:",
+    "  synesis-coder document --project p.synp --bibref E01 --input E01.txt --prompt-only",
+)
+
+_EPILOG_DATASET = _ex(
+    "",
+    "  # Process the whole TOML corpus declared by INCLUDE DATASET in the .synp",
+    "  # (one .syn per record):",
+    "  synesis-coder dataset --project lattes.synp --output-dir annotations/",
+    "",
+    "  # Control concurrency:",
+    "  synesis-coder dataset --project lattes.synp --output-dir annotations/ --concurrent 3",
+    "",
+    "  # Test with a single TOML record (overrides the .synp glob for this run only):",
+    "  synesis-coder dataset --project lattes.synp --output-dir _test/ "
+    "--dataset curriculos/01_record.toml",
 )
 
 _EPILOG_ONTOLOGY = _ex(
@@ -286,6 +335,12 @@ _EPILOG_ONTOLOGY = _ex(
     "",
     "  # Control concurrency with a faster model:",
     "  synesis-coder ontology --project p.synp --output p.syno --concurrent 3 --model claude-sonnet-4-6",
+    "",
+    "  # Inspect the assembled prompt without calling the LLM:",
+    "  synesis-coder ontology --project p.synp --prompt-only",
+    "",
+    "  # Custom destination for the prompt dump:",
+    "  synesis-coder ontology --project p.synp --prompt-only --output prompts/ontology.md",
 )
 
 _EPILOG_SUGGEST = _ex(
@@ -434,8 +489,13 @@ def main(ctx: click.Context, verbose: int, quiet: int) -> None:
               help="Maximum output tokens. Overrides SYNESIS_CODER_MAX_TOKENS.")
 @click.option("--temperature", default=None, type=float,
               help="Model temperature (0 = deterministic).")
+@click.option("--prompt-only", "prompt_only", is_flag=True, default=False,
+              help="Write the assembled prompt as Markdown and exit. No LLM call.")
+@click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
+              help="Destination of the --prompt-only Markdown file. "
+                   "Default: <project>_item_prompt.md next to the .synp.")
 def item(project, bibref, text, output_format, model, thinking_budget,
-         language, max_tokens, temperature):
+         language, max_tokens, temperature, prompt_only, output_path):
     """Generate a Synesis ITEM block from a text excerpt and bibliographic reference."""
     from synesis_coder.modes.item_mode import process_item
 
@@ -449,8 +509,13 @@ def item(project, bibref, text, output_format, model, thinking_budget,
         os.environ["SYNESIS_CODER_TEMPERATURE"] = str(temperature)
 
     try:
-        click.echo(process_item(project_path=project, bibref=bibref, text=text,
-                                format=output_format, model=model))
+        result = process_item(project_path=project, bibref=bibref, text=text,
+                              format=output_format, model=model,
+                              prompt_only=prompt_only)
+        if prompt_only:
+            _emit_prompt(result, project, "item", output_path)
+        else:
+            click.echo(result)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except Exception as exc:
@@ -462,8 +527,9 @@ def item(project, bibref, text, output_format, model, thinking_budget,
               help="Path to the project .synp file.")
 @click.option("--input", "bib_path", required=True, type=click.Path(exists=True, path_type=Path),
               help="Path to the .bib file containing abstracts.")
-@click.option("--output", "output_dir", required=True, type=click.Path(path_type=Path),
-              help="Output directory for the generated .syn files.")
+@click.option("--output-dir", "--output", "output_dir", default=None, type=click.Path(path_type=Path),
+              help="Output directory for the generated .syn files (a folder, not a file path). "
+                   "Required unless --prompt-only.")
 @click.option("--concurrent", default=5, show_default=True,
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--batch-size", default=25, show_default=True,
@@ -484,11 +550,17 @@ def item(project, bibref, text, output_format, model, thinking_budget,
               help="Write a human-readable Markdown audit log of the LLM pipeline "
                    "(<project>_abstract_debug.md) in the output directory. "
                    "Overwrites if it exists.")
+@click.option("--prompt-only", "prompt_only", is_flag=True, default=False,
+              help="Write the assembled prompt as Markdown and exit. No LLM call. "
+                   "Destination: <project>_abstract_prompt.md, or --output-dir if given.")
 def abstract(project, bib_path, output_dir, concurrent, batch_size, per_reference,
              output_format, model, thinking_budget, language, max_tokens, temperature,
-             debug):
+             debug, prompt_only):
     """Process a .bib corpus in batch, generating Synesis annotations (SOURCE + ITEMs)."""
     from synesis_coder.modes.abstract_mode import process_abstract
+
+    if output_dir is None and not prompt_only:
+        raise click.UsageError("Missing option '--output-dir' (required unless --prompt-only).")
 
     if thinking_budget is not None:
         os.environ["SYNESIS_CODER_THINKING_BUDGET"] = str(thinking_budget)
@@ -500,10 +572,58 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
         os.environ["SYNESIS_CODER_TEMPERATURE"] = str(temperature)
 
     try:
-        click.echo(process_abstract(project_path=project, bib_path=bib_path,
-                                    output_dir=output_dir, concurrent=concurrent,
-                                    batch_size=batch_size, per_reference=per_reference,
-                                    model=model, format=output_format, debug=debug))
+        result = process_abstract(project_path=project, bib_path=bib_path,
+                                  output_dir=output_dir, concurrent=concurrent,
+                                  batch_size=batch_size, per_reference=per_reference,
+                                  model=model, format=output_format, debug=debug,
+                                  prompt_only=prompt_only)
+        if prompt_only:
+            # --output-dir é uma PASTA neste modo; o dump é um arquivo dentro dela.
+            dest = (output_dir / f"{project.stem}_abstract_prompt.md") if output_dir else None
+            _emit_prompt(result, project, "abstract", dest)
+        else:
+            click.echo(result)
+    except (FileNotFoundError, ValueError, EnvironmentError) as exc:
+        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+
+
+@main.command(epilog=_EPILOG_DATASET)
+@click.option("--project", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to the project .synp file (declares INCLUDE DATASET).")
+@click.option("--output-dir", "--output", "output_dir", required=True, type=click.Path(path_type=Path),
+              help="Output directory for the generated .syn files (one per record).")
+@click.option("--concurrent", default=5, show_default=True,
+              help="Maximum number of simultaneous LLM calls.")
+@click.option("--single-file", "single_file", is_flag=True, default=False,
+              help="Write a single dataset.syn instead of one .syn per record.")
+@click.option("--dataset", "dataset_glob", default=None,
+              help="Overrides the INCLUDE DATASET glob from the .synp for this run only "
+                   "(e.g. a single .toml file for a quick test) — the project file is not modified.")
+@click.option("--model", default=None, help="LLM model ID (overrides SYNESIS_CODER_MODEL).")
+@click.option("--language", default=None, help="Output language for free-text fields (e.g. pt-BR, en).")
+@click.option("--temperature", default=None, type=float,
+              help="Model temperature (0 = deterministic).")
+def dataset(project, output_dir, concurrent, single_file, dataset_glob, model, language, temperature):
+    """Process a TOML dataset corpus (INCLUDE DATASET), generating SOURCE + ITEMs per record.
+
+    The dataset path comes from the .synp `INCLUDE DATASET "<glob>.toml"`; fields
+    declared `ON DATASET` are resolved deterministically by the compiler, and the
+    interpretive ITEM fields are generated by the LLM from the TOML context.
+    """
+    from synesis_coder.modes.dataset_mode import process_dataset
+
+    if language:
+        os.environ["SYNESIS_CODER_LANGUAGE"] = language
+    if temperature is not None:
+        os.environ["SYNESIS_CODER_TEMPERATURE"] = str(temperature)
+
+    try:
+        click.echo(process_dataset(
+            project_path=project, output_dir=output_dir, concurrent=concurrent,
+            per_record=not single_file, model=model, dataset_glob=dataset_glob,
+        ))
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except Exception as exc:
@@ -518,8 +638,8 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
 @click.option("--input", "input_path", required=True,
               type=click.Path(exists=True, path_type=Path),
               help="Path to the .txt or .md file to be annotated.")
-@click.option("--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path for the generated .syn file.")
+@click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
+              help="Output path for the generated .syn file. Required unless --prompt-only.")
 @click.option("--chunk-size", default=12000, show_default=True,
               help="Maximum chunk size in characters.")
 @click.option("--overlap", default=2400, show_default=True,
@@ -543,11 +663,17 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
               help="Overwrite the output file without confirmation if it already exists.")
 @click.option("--backup", is_flag=True, default=False,
               help="Create a .bak copy of the existing output before overwriting.")
+@click.option("--prompt-only", "prompt_only", is_flag=True, default=False,
+              help="Write the assembled prompt as Markdown and exit. No LLM call. "
+                   "Destination: --output, or <project>_document_prompt.md.")
 def document(project, bibref, input_path, output_path, chunk_size, overlap,
              concurrent, output_format, model, thinking_budget, language,
-             max_tokens, temperature, debug, overwrite, backup):
+             max_tokens, temperature, debug, overwrite, backup, prompt_only):
     """Process a long document (.txt/.md) with chunking, generating a .syn annotation file."""
     from synesis_coder.modes.document_mode import process_document
+
+    if output_path is None and not prompt_only:
+        raise click.UsageError("Missing option '--output' (required unless --prompt-only).")
 
     if thinking_budget is not None:
         os.environ["SYNESIS_CODER_THINKING_BUDGET"] = str(thinking_budget)
@@ -559,12 +685,17 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
         os.environ["SYNESIS_CODER_TEMPERATURE"] = str(temperature)
 
     try:
-        click.echo(process_document(project_path=project, bibref=bibref,
-                                    input_path=input_path, output_path=output_path,
-                                    chunk_size=chunk_size, overlap=overlap,
-                                    concurrent=concurrent, model=model,
-                                    format=output_format, debug=debug,
-                                    overwrite=overwrite, backup=backup))
+        result = process_document(project_path=project, bibref=bibref,
+                                  input_path=input_path, output_path=output_path,
+                                  chunk_size=chunk_size, overlap=overlap,
+                                  concurrent=concurrent, model=model,
+                                  format=output_format, debug=debug,
+                                  overwrite=overwrite, backup=backup,
+                                  prompt_only=prompt_only)
+        if prompt_only:
+            _emit_prompt(result, project, "document", output_path)
+        else:
+            click.echo(result)
     except FileExistsError as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
@@ -576,8 +707,8 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
 @main.command(epilog=_EPILOG_ONTOLOGY)
 @click.option("--project", required=True, type=click.Path(exists=True, path_type=Path),
               help="Path to the project .synp file.")
-@click.option("--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path for the generated .syno file.")
+@click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
+              help="Output path for the generated .syno file. Required unless --prompt-only.")
 @click.option("--update", is_flag=True, default=False,
               help="Only generate entries for codes not yet defined in the .syno.")
 @click.option("--concurrent", default=5, show_default=True,
@@ -596,10 +727,17 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
               help="Overwrite the output file without confirmation if it already exists.")
 @click.option("--backup", is_flag=True, default=False,
               help="Create a .bak copy of the existing output before overwriting.")
+@click.option("--prompt-only", "prompt_only", is_flag=True, default=False,
+              help="Write the assembled prompt as Markdown and exit. No LLM call. "
+                   "Destination: --output, or <project>_ontology_prompt.md.")
 def ontology(project, output_path, update, concurrent, output_format, model,
-             thinking_budget, language, max_tokens, temperature, overwrite, backup):
+             thinking_budget, language, max_tokens, temperature, overwrite, backup,
+             prompt_only):
     """Generate ONTOLOGY entries (.syno) from the project's annotated corpus."""
     from synesis_coder.modes.ontology_mode import process_ontology
+
+    if output_path is None and not prompt_only:
+        raise click.UsageError("Missing option '--output' (required unless --prompt-only).")
 
     if thinking_budget is not None:
         os.environ["SYNESIS_CODER_THINKING_BUDGET"] = str(thinking_budget)
@@ -611,10 +749,15 @@ def ontology(project, output_path, update, concurrent, output_format, model,
         os.environ["SYNESIS_CODER_TEMPERATURE"] = str(temperature)
 
     try:
-        click.echo(process_ontology(project_path=project, output_path=output_path,
-                                    update=update, concurrent=concurrent,
-                                    model=model, format=output_format,
-                                    overwrite=overwrite, backup=backup))
+        result = process_ontology(project_path=project, output_path=output_path,
+                                  update=update, concurrent=concurrent,
+                                  model=model, format=output_format,
+                                  overwrite=overwrite, backup=backup,
+                                  prompt_only=prompt_only)
+        if prompt_only:
+            _emit_prompt(result, project, "ontology", output_path)
+        else:
+            click.echo(result)
     except FileExistsError as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
@@ -646,14 +789,14 @@ def critique(syn_file, project_path, output_path, concurrent, suspicion_threshol
     from synesis_coder.modes.critique_mode import process_critique
 
     try:
-        _validate_phase_env("critique")
+        resolved_model = model or _validate_phase_env("critique")
         if suspicion_threshold is None:
             suspicion_threshold = float(
                 os.environ.get("SYNESIS_CODER_SUSPICION_THRESHOLD", "0.20")
             )
         click.echo(process_critique(syn_path=syn_file, project_path=project_path,
                                     output_path=output_path, concurrent=concurrent,
-                                    model=model, suspicion_threshold=suspicion_threshold,
+                                    model=resolved_model, suspicion_threshold=suspicion_threshold,
                                     format=output_format, debug=debug_mode))
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
@@ -685,14 +828,14 @@ def normalize(synr_files, project_path, output_dir, concurrent, confidence_thres
     from synesis_coder.modes.normalize_mode import process_normalize
 
     try:
-        _validate_phase_env("normalization")
+        resolved_model = model or _validate_phase_env("normalization")
         if confidence_threshold is None:
             confidence_threshold = float(
                 os.environ.get("SYNESIS_CODER_MERGE_CONFIDENCE_THRESHOLD", "0.65")
             )
         click.echo(process_normalize(synr_paths=list(synr_files),
                                      project_path=project_path, output_dir=output_dir,
-                                     concurrent=concurrent, model=model,
+                                     concurrent=concurrent, model=resolved_model,
                                      confidence_threshold=confidence_threshold,
                                      inventory_path=inventory_path, format=output_format))
     except (FileNotFoundError, EnvironmentError) as exc:

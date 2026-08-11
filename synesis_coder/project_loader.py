@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import synesis
 from synesis.ast.nodes import FieldType, Scope
@@ -23,6 +23,7 @@ def load_project(
     load_annotations: bool = True,
     load_ontology: bool = False,
     tolerate_annotation_errors: bool = False,
+    dataset_glob_override: Optional[str] = None,
 ) -> dict:
     """Carrega o projeto via synesis.load() e retorna contexto completo.
 
@@ -37,6 +38,11 @@ def load_project(
             são emitidos como warnings em vez de abortar. Erros de template,
             bibref e sintaxe do .synp continuam abortando. Usar em modos
             geradores (document) onde o output substituirá as anotações atuais.
+        dataset_glob_override: Se informado, substitui o glob de
+            `INCLUDE DATASET "<glob>"` declarado no .synp (ex.: para restringir
+            a um único arquivo TOML em teste pontual) sem editar o projeto no
+            disco. Resolvido relativo ao mesmo `base_dir` do .synp. Ignorado
+            quando o projeto não declara `INCLUDE DATASET`.
 
     Returns:
         dict com chaves:
@@ -90,6 +96,18 @@ def load_project(
     if load_ontology:
         ontology_contents = _all_ontology
 
+    # Dataset TOML (ON DATASET): a chave de indexação vem do template, então o
+    # template é parseado aqui, antes de synesis.load(), para descobri-la. O
+    # dataset_index é passado ao compilador para resolver os valores ON DATASET.
+    from synesis.parser.template_loader import load_template_from_string
+
+    _template_for_dataset = load_template_from_string(
+        template_content, template_path.name
+    )
+    dataset_index = _load_dataset(
+        project_content, base_dir, _template_for_dataset, dataset_glob_override
+    )
+
     # Compilar via synesis.load() — única chamada ao compilador
     result = synesis.load(
         project_content=project_content,
@@ -97,6 +115,7 @@ def load_project(
         annotation_contents=annotation_contents or None,
         ontology_contents=ontology_contents or None,
         bibliography_content=bib_content,
+        dataset_index=dataset_index,
         project_filename=project_path.name,
         template_filename=template_path.name,
     )
@@ -192,6 +211,7 @@ def load_project(
         "project_content": project_content,
         "template_content": template_content,
         "bib_content": bib_content,
+        "dataset_index": dataset_index,  # registros TOML (ON DATASET); None se ausente
         "annotation_contents": annotation_contents,  # para validação de ITEMs isolados
         "project_path": project_path,
         "output_language": os.environ.get("SYNESIS_CODER_LANGUAGE", "").strip() or None,
@@ -224,10 +244,24 @@ def assert_bibref_known(ctx: dict, bibref: str) -> None:
         return
 
     if not bib_keys:
+        import re
+
+        project_content = ctx.get("project_content", "")
+        has_bibliography_directive = bool(
+            re.search(r"INCLUDE\s+BIBLIOGRAPHY\s+\"", project_content, re.IGNORECASE)
+        )
+        if not has_bibliography_directive:
+            # Projeto sem INCLUDE BIBLIOGRAPHY: SOURCE é definido exclusivamente
+            # pelo template (synesis core >= 0.6.0), sem bibref para validar
+            # contra um .bib. Nada a validar aqui — o compilador já teria
+            # abortado o load_project() se o .synp fosse inválido para esse modo.
+            return
+
         raise ValueError(
-            f"Bibref '@{key}' não pôde ser validado: o projeto não tem "
-            "bibliografia (.bib) carregada. Verifique a diretiva "
-            "INCLUDE BIBLIOGRAPHY no arquivo .synp."
+            f"Bibref '@{key}' não pôde ser validado: o projeto declara "
+            "INCLUDE BIBLIOGRAPHY no arquivo .synp mas a bibliografia (.bib) "
+            "não carregou nenhuma chave. Verifique se o arquivo .bib existe "
+            "e não está vazio."
         )
 
     # Amostra das chaves disponíveis (todas se forem poucas)
@@ -276,37 +310,132 @@ def _collect_includes(
     """Lê arquivos referenciados nas diretivas INCLUDE do .synp.
 
     Retorna (annotation_contents, ontology_contents, bib_content).
-    Arquivos ausentes são silenciosamente ignorados.
+
+    Delega a resolução de caminhos aos utilitários do compilador
+    (`synesis.parser.paths`) em vez de reimplementá-la, de modo que as três
+    formas aceitas pelo .synp funcionem aqui exatamente como no `synesis
+    compile`:
+
+    - GLOB (`"annotations/*.syn"`): expandido por `resolve_glob`, que confina
+      o resultado ao diretório do projeto (`../*.syn` não escapa).
+    - SHARED (`INCLUDE SHARED ONTOLOGY "../ontologia.syno"`): a palavra
+      `SHARED` autoriza alvo fora do projeto, e é repassada a
+      `resolve_include(shared=True)` — sem ela a ontologia compartilhada
+      seria recusada por ESCAPES_PROJECT.
+    - Caminho literal: resolvido por `resolve_include`.
+
+    Arquivos ausentes ou ilegíveis continuam sendo ignorados silenciosamente
+    (o compilador é quem reporta o diagnóstico ao usuário); aqui só interessa
+    popular os índices de contexto.
     """
     import re
+
+    from synesis.parser.paths import has_glob, resolve_glob, resolve_include
 
     annotation_contents: Dict[str, str] = {}
     ontology_contents: Dict[str, str] = {}
     bib_content: Optional[str] = None
 
+    # `SHARED` é opcional e não-capturante: só ONTOLOGY o aceita na gramática,
+    # mas tolerá-lo aqui para os três tipos mantém a regex simples sem risco
+    # (um `INCLUDE SHARED ANNOTATIONS` inválido seria barrado pelo compilador).
     include_pattern = re.compile(
-        r'INCLUDE\s+(ANNOTATIONS|ONTOLOGY|BIBLIOGRAPHY)\s+"([^"]+)"',
+        r'INCLUDE\s+(SHARED\s+)?(ANNOTATIONS|ONTOLOGY|BIBLIOGRAPHY)\s+"([^"]+)"',
         re.IGNORECASE,
     )
 
     for match in include_pattern.finditer(project_content):
-        include_type = match.group(1).upper()
-        filename = match.group(2)
-        file_path = base_dir / filename
+        is_shared = match.group(1) is not None
+        include_type = match.group(2).upper()
+        raw = match.group(3)
 
-        if not file_path.exists():
-            continue
+        if has_glob(raw):
+            paths, _outside = resolve_glob(base_dir, raw)
+        else:
+            resolution = resolve_include(base_dir, raw, shared=is_shared)
+            paths = [resolution.path] if resolution.error is None else []
 
-        content = file_path.read_text(encoding="utf-8")
+        for path in paths:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
 
-        if include_type == "ANNOTATIONS":
-            annotation_contents[filename] = content
-        elif include_type == "ONTOLOGY":
-            ontology_contents[filename] = content
-        elif include_type == "BIBLIOGRAPHY":
-            bib_content = content
+            # Chave: caminho relativo ao projeto quando possível (identifica o
+            # arquivo real expandido do glob, não o padrão), com fallback para
+            # o nome — o compilador usa isso só como rótulo de diagnóstico.
+            try:
+                key = path.relative_to(base_dir.resolve()).as_posix()
+            except ValueError:
+                key = path.name
+
+            if include_type == "ANNOTATIONS":
+                annotation_contents[key] = content
+            elif include_type == "ONTOLOGY":
+                ontology_contents[key] = content
+            elif include_type == "BIBLIOGRAPHY":
+                bib_content = content
 
     return annotation_contents, ontology_contents, bib_content
+
+
+def _dataset_key_path(template) -> Optional[str]:
+    """Descobre o caminho da chave de indexação do dataset a partir do template.
+
+    A chave é o `dataset_path` do campo SCOPE SOURCE que também é `IDENTIFIES`
+    (D3/D8): é a identidade do registro. Se nenhum campo IDENTIFIES tiver
+    ON DATASET, usa o primeiro campo SOURCE com ON DATASET como fallback.
+    O loader é agnóstico — quem sabe a chave é o template, não o loader.
+    """
+    from synesis.ast.nodes import Scope
+
+    fallback: Optional[str] = None
+    for spec in template.field_specs.values():
+        if getattr(spec, "value_origin", "document") != "dataset":
+            continue
+        if spec.scope != Scope.SOURCE:
+            continue
+        path = getattr(spec, "dataset_path", None)
+        if path is None:
+            continue
+        if getattr(spec, "identifies", None):
+            return path
+        if fallback is None:
+            fallback = path
+    return fallback
+
+
+def _load_dataset(
+    project_content: str,
+    base_dir: Path,
+    template,
+    glob_override: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Carrega o dataset TOML declarado por INCLUDE DATASET no .synp.
+
+    Retorna None quando o projeto não declara INCLUDE DATASET ou o template não
+    tem campo ON DATASET (chave indescobrível) — mantendo no-op para projetos
+    sem dataset. Erros de chave/parse do loader propagam (falha explícita).
+
+    `glob_override`, quando informado, substitui o glob extraído do .synp —
+    permite restringir a um único arquivo TOML sem editar o projeto no disco.
+    Só tem efeito se o projeto já declarar INCLUDE DATASET (não injeta um
+    dataset em projeto que não tem a diretiva).
+    """
+    import re
+
+    from synesis.parser.dataset_loader import load_dataset
+
+    match = re.search(
+        r'INCLUDE\s+DATASET\s+"([^"]+)"', project_content, re.IGNORECASE
+    )
+    if not match:
+        return None
+    key_path = _dataset_key_path(template)
+    if key_path is None:
+        return None
+    glob = glob_override if glob_override is not None else match.group(1)
+    return load_dataset(glob, key_path=key_path, base_dir=base_dir)
 
 
 def _build_code_index(linked) -> dict:

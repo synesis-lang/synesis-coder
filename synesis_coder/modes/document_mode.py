@@ -49,14 +49,14 @@ from synesis_coder.block_assembler import assemble_items, assemble_source
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.project_loader import assert_bibref_known, load_project
-from synesis_coder.synr_io import safe_write_output
 from synesis_coder.prompt_builder import (
     build_document_prompt,
     build_document_source_values_prompt,
     build_document_values_prompt,
 )
-from synesis_coder.runtime_info import runtime_banner
+from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
 from synesis_coder.schema_builder import build_item_schema, build_source_schema
+from synesis_coder.synr_io import safe_write_output
 from synesis_coder.text_cleaner import clean_document
 from synesis_coder.validator import (
     _extract_item_blocks,
@@ -755,7 +755,7 @@ async def _process_chunk(
         annotation_key = f"{bibref}_chunk{chunk_index}.syn"
         final_syn, success = await validate_and_fix_async(
             raw, ctx, llm_client, annotation_key=annotation_key,
-            recorder=llm_client.recorder, context=context,
+            recorder=llm_client.recorder, context=context, scope="item",
         )
 
         # Extrair apenas blocos ITEM
@@ -809,6 +809,7 @@ def process_document(
     debug: bool = False,
     overwrite: bool = False,
     backup: bool = False,
+    prompt_only: bool = False,
 ) -> str:
     """Processa um documento longo, gerando anotações Synesis (.syn).
 
@@ -826,10 +827,28 @@ def process_document(
             ao lado do arquivo de saída (<projeto>_<bibref>_debug.md).
         overwrite: Se True, sobrescreve output existente sem confirmação.
         backup: Se True, cria backup (.syn.bak) do output existente antes de gravar.
+        prompt_only: Se True, retorna o prompt montado em Markdown e não chama
+            o LLM (nenhum arquivo é escrito).
 
     Returns:
-        String com resumo da execução.
+        String com resumo da execução, ou o prompt em Markdown quando
+        prompt_only=True.
     """
+    if prompt_only:
+        from synesis_coder.prompt_dump import dump_prompt
+
+        # O prompt de chunk é o dominante do modo (o SOURCE é gerado uma vez).
+        # Usa o chunk 0 real — passa pela mesma limpeza e divisão da execução.
+        text = clean_document(read_document(input_path))
+        chunks = split_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+        ctx = load_project(
+            project_path, load_annotations=True, tolerate_annotation_errors=True
+        )
+        return dump_prompt(
+            ctx, mode="document", bibref=bibref,
+            text=chunks[0] if chunks else "",
+        )
+
     return asyncio.run(
         _process_document_async(
             project_path, bibref, input_path, output_path,
@@ -988,6 +1007,10 @@ async def _process_document_async(
     elapsed = time.monotonic() - start_time
     items_count = len(final_item_blocks)
     status = "OK" if not has_errors else "COM AVISOS"
+
+    # Degradação silenciosa: chunks que caíram para texto livre rodaram sem as
+    # restrições do schema, mas o .syn resultante é sintaticamente válido.
+    warn_schema_fallbacks(llm_client)
 
     # Gravar relatório de debug (--debug)
     if recorder is not None:

@@ -182,6 +182,7 @@ async def _refine_single_item(
         best_block = item_block
         best_score = initial_score
         current = item_block
+        current_tags = initial_tags
         history = {_normalize_block(item_block)}
         trace = [IterationRecord(0, initial_score)]
 
@@ -189,16 +190,16 @@ async def _refine_single_item(
             if best_score < suspicion_threshold:
                 break  # convergiu — abaixo do limiar de suspeição
 
-            tags = await _critique_tags(
-                current, bibref, ctx, critique_client, source_text=source_text
-            )
+            tags = current_tags
             if tags is None:
                 break  # falha de critique — para com a melhor versão atual
 
             candidate = await _re_extract(
                 ctx, bibref, source_text, current, tags, refine_client, thinking_budget
             )
-            candidate, ok = await validate_and_fix_async(candidate, ctx, refine_client)
+            candidate, ok = await validate_and_fix_async(
+                candidate, ctx, refine_client, scope="item",
+            )
             if not ok:
                 _log.warning(
                     "ITEM @%s iter %d: re-extração inválida — mantendo versão anterior",
@@ -229,6 +230,7 @@ async def _refine_single_item(
                 break
 
             best_block, best_score, current = candidate, cand_score, candidate
+            current_tags = cand_tags
 
         return RefineResult(
             bibref=bibref,

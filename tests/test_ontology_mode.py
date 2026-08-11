@@ -129,6 +129,60 @@ class TestGetPendingCodes:
         assert result == []
 
 
+class TestUpdatePreservesExistingEntries:
+    """Regressão: `--update` não pode apagar as entradas que ele pulou.
+
+    `_get_pending_codes` exclui de propósito os códigos já definidos, então eles
+    não aparecem em `results`. Gravar só `results` com overwrite apagava todas
+    as definições preexistentes — inclusive as curadas à mão. Observado num
+    caso real: 74 entradas curadas viraram 59 geradas.
+    """
+
+    def test_existing_content_is_preserved_and_new_appended(self, tmp_path):
+        import asyncio
+
+        from synesis_coder.modes import ontology_mode
+
+        output = tmp_path / "ontologia.syno"
+        output.write_text(
+            "ONTOLOGY curada_a\n  ontology_description: X\nEND ONTOLOGY\n\n"
+            "ONTOLOGY curada_b\n  ontology_description: Y\nEND ONTOLOGY\n",
+            encoding="utf-8",
+        )
+
+        ctx = _make_ctx(
+            code_index_codes=["curada_a", "curada_b", "nova_c"],
+            ontology_index={"curada_a": MagicMock(), "curada_b": MagicMock()},
+        )
+        novo_bloco = "ONTOLOGY nova_c\n  ontology_description: Z\nEND ONTOLOGY"
+
+        async def fake_process_one(code, _ctx, _client, _sem):
+            return (code, novo_bloco, True)
+
+        with patch.object(ontology_mode, "load_project", return_value=ctx), \
+             patch.object(ontology_mode, "LLMClient", MagicMock()), \
+             patch.object(ontology_mode, "runtime_banner", MagicMock()), \
+             patch.object(ontology_mode, "_process_one_code", fake_process_one):
+            asyncio.run(
+                ontology_mode._process_ontology_async(
+                    project_path=Path("dummy.synp"),
+                    output_path=output,
+                    update=True,
+                    concurrent=1,
+                    model=None,
+                    format="plain",
+                    overwrite=False,
+                    backup=False,
+                )
+            )
+
+        content = output.read_text(encoding="utf-8")
+        assert "ONTOLOGY curada_a" in content, "entrada curada foi apagada"
+        assert "ONTOLOGY curada_b" in content, "entrada curada foi apagada"
+        assert "ONTOLOGY nova_c" in content, "entrada nova não foi gravada"
+        assert content.count("ONTOLOGY ") >= 3
+
+
 # ---------------------------------------------------------------------------
 # TestBuildSemanticCtx
 # ---------------------------------------------------------------------------
