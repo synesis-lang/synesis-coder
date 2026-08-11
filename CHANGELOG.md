@@ -41,6 +41,18 @@ Primeira publicação no PyPI.
   "Sample codes", mas `.gitignore` não desrastreia o que já está rastreado.
   Nenhum era importado pelo pacote, pelos testes ou pela documentação.
 
+### Fixed — `_get_model_output_cap` quebrava com client mockado
+
+- **10 testes falhavam com `TypeError` fora do ambiente de desenvolvimento**
+  (`llm_client.py`). `getattr(model_info, "max_tokens", 0)` num `MagicMock`
+  devolve **outro MagicMock**, não o default `0` — então o `cap > 0` seguinte
+  comparava MagicMock com int e estourava.
+  - Invisível localmente: só aparece quando o client é mockado *e* o corpus de
+    fixtures está ausente, combinação que só ocorria no CI.
+  - O helper `_int_attr()` já existia exatamente para isto (checa o tipo em vez
+    de confiar no default do `getattr`) e era usado em 4 pontos — menos neste.
+    Agora também aqui.
+
 ### Fixed — suíte dependia de caminho absoluto da máquina de desenvolvimento
 
 - **9 dos 12 jobs de teste falhavam no CI.** Doze arquivos de teste fixavam

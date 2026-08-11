@@ -872,7 +872,10 @@ class LLMClient:
         try:
             if self.backend == "anthropic":
                 model_info = self._client.models.retrieve(self.model)
-                cap = getattr(model_info, "max_tokens", 0) or 0
+                # _int_attr, e nao getattr direto: num MagicMock (todo teste que
+                # mocka o client) o getattr devolve outro MagicMock em vez do
+                # default 0, e o `cap > 0` abaixo estoura TypeError.
+                cap = _int_attr(model_info, "max_tokens")
         except Exception as exc:
             _log.debug("Não foi possível obter teto do modelo '%s': %s", self.model, exc)
 
