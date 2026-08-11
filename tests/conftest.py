@@ -30,6 +30,7 @@ Defesa em profundidade (nenhuma camada sozinha basta):
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -41,19 +42,53 @@ except ModuleNotFoundError:
     pass
 
 
+# Corpus de fixtures (projetos reais usados como entrada dos testes).
+# Historicamente fixado em `d:/GitHub/case-studies`, um caminho absoluto da
+# maquina de desenvolvimento — que nao existe em runner de CI algum. A suite
+# passava localmente e falhava em 9 jobs no GitHub Actions.
+#
+# `SYNESIS_CASE_STUDIES` permite apontar para outro local; na ausencia dele o
+# default preserva o comportamento local de sempre.
+CASES_DIR = Path(
+    os.environ.get("SYNESIS_CASE_STUDIES", "d:/GitHub/case-studies")
+)
+CASES_AVAILABLE = CASES_DIR.is_dir()
+
+
 def pytest_collection_modifyitems(config, items):
-    """Pula testes `integration` quando não há credencial de API.
+    """Pula testes que dependem de recursos externos ausentes.
 
-    Só age sobre itens marcados; a suíte offline (a esmagadora maioria) não é
-    tocada. Não substitui o filtro por marker — complementa-o para o caso em
-    que os testes de integração são pedidos explicitamente.
+    Duas guardas independentes:
+
+    1. `integration` sem `ANTHROPIC_API_KEY` — chamada real de API.
+    2. Qualquer teste cujo modulo dependa do corpus de fixtures, quando o
+       diretorio nao existe (o caso do CI).
+
+    Ambas agem na coleta, DEPOIS de todos os imports — por isso leem o
+    ambiente ja com o `.env` aplicado e nao dependem de ordem de import.
     """
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return
-
     skip_no_key = pytest.mark.skip(
         reason="ANTHROPIC_API_KEY não disponível (teste de integração exige API real)"
     )
+    skip_no_cases = pytest.mark.skip(
+        reason=(
+            f"corpus de fixtures ausente em {CASES_DIR} "
+            "(defina SYNESIS_CASE_STUDIES para apontar a outro local)"
+        )
+    )
+
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
     for item in items:
-        if "integration" in item.keywords:
+        if not has_key and "integration" in item.keywords:
             item.add_marker(skip_no_key)
+
+        # O modulo declara CASES_DIR/_PROJECT quando depende do corpus. Ler o
+        # atributo do modulo (em vez de manter uma lista de arquivos aqui)
+        # mantem a guarda correta quando um teste novo passa a depender dele.
+        if not CASES_AVAILABLE:
+            module = getattr(item, "module", None)
+            if module is not None and any(
+                hasattr(module, attr) for attr in ("CASES_DIR", "_PROJECT")
+            ):
+                item.add_marker(skip_no_cases)

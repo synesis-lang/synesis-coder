@@ -41,6 +41,25 @@ Primeira publicação no PyPI.
   "Sample codes", mas `.gitignore` não desrastreia o que já está rastreado.
   Nenhum era importado pelo pacote, pelos testes ou pela documentação.
 
+### Fixed — suíte dependia de caminho absoluto da máquina de desenvolvimento
+
+- **9 dos 12 jobs de teste falhavam no CI.** Doze arquivos de teste fixavam
+  `d:/GitHub/case-studies` — um caminho absoluto que não existe em runner
+  algum. A suíte passava localmente e falhava em todas as plataformas.
+  - Não era regressão: o CI nunca havia executado a suíte de verdade, porque
+    o passo antigo tolerava o exit code 5 do pytest (corrigido nesta mesma
+    versão). Ao passar a executar, o defeito latente apareceu.
+  - `tests/conftest.py` passa a resolver o corpus por `SYNESIS_CASE_STUDIES`,
+    com o caminho antigo como default — comportamento local inalterado.
+    Ausente o diretório, os testes que dependem dele são **pulados**, não
+    falham.
+  - A detecção lê o atributo `CASES_DIR`/`_PROJECT` do módulo em vez de manter
+    uma lista de arquivos no conftest, para continuar correta quando um teste
+    novo passar a depender do corpus.
+  - Verificado apontando `SYNESIS_CASE_STUDIES` para um caminho inexistente:
+    **272 passed, 272 skipped, 0 failed** (antes: 9 jobs vermelhos). Com o
+    corpus presente: 544 passed, inalterado.
+
 ### Fixed — guarda dos testes de integração era inerte
 
 - **O `skipif` que protegia os testes de chamada real de API nunca disparava.**
