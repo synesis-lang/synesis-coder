@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import sys
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -162,9 +163,13 @@ def _build_main_help() -> str:
         + "  " + _c("|", fg="bright_black") + "  "
         + _c("Core", fg="white", bold=True) + f" (v{syn_ver})"
     )
-    desc = (
+    credits = (
+        "Copyright (c) 2011-2026 Christian Maciel de Britto\n\n"
+        "https://github.com/synesis-lang/synesis-coder\n\n"
         "Inference engine for generating valid annotations in the Synesis ecosystem.\n"
-        "The template defines all fields, relations, and constraints — nothing is hardcoded."
+        "The template defines all fields, relations, and constraints — nothing is hardcoded.\n\n"
+        "Licensed under AGPL-3.0-only WITH the Synesis Data-Output Exception\n"
+        "(annotations and exports you produce are yours — see LICENSE.exception)."
     )
     usage = (
         _c("Usage:", fg="yellow", bold=True)
@@ -172,22 +177,27 @@ def _build_main_help() -> str:
     )
 
     groups = [
-        ("Ingestion & Extraction", [
-            ("item",        "Generates an ITEM block from text and a bibref  [--prompt-only]"),
-            ("abstract",    "Processes a .bib corpus in batch (SOURCE + ITEMs)  [--debug] [--prompt-only]"),
-            ("document",    "Processes a long document (.txt/.md) with automatic chunking  [--debug] [--prompt-only]"),
-            ("dataset",     "Processes a TOML dataset corpus (SOURCE + ITEMs per record)"),
+        ("Annotating a corpus", [
+            ("abstract",    "Annotates a .bib corpus in batch — SOURCE + ITEMs per reference"),
+            ("document",    "Annotates a long document (.txt/.md), chunked automatically"),
+            ("dataset",     "Annotates a TOML dataset — SOURCE + ITEMs per record"),
+            ("item",        "Annotates a single excerpt, given its bibref"),
         ]),
-        ("Structuring & LLM", [
-            ("ontology",    "Generates ONTOLOGY entries (.syno) from the annotated corpus  [--prompt-only]"),
-            ("suggest",     "Suggests relevant codes for a text excerpt"),
+        ("Building the ontology", [
+            ("ontology",    "Generates ONTOLOGY entries (.syno) from the annotated corpus"),
+            ("suggest",     "Suggests codes from the project vocabulary for an excerpt"),
+        ]),
+        ("Reviewing annotations (ACT pipeline)", [
+            ("critique",    "[1] Reviews a .syn and emits .synr with # REVISION blocks"),
+            ("normalize",   "[2] Canonicalizes codes across the whole corpus"),
+            ("incorporate", "[3] Applies the .synr revisions and emits the final .syn"),
+            ("refine",      "[R] Re-extracts flagged ITEMs using the review feedback"),
+        ]),
+        ("Checking without an LLM", [
+            ("anchor",      "Checks that each ITEM excerpt occurs in its source (free, offline)"),
+        ]),
+        ("Training data", [
             ("finetune",    "Enriches an Alpaca dataset via LLM for fine-tuning"),
-        ]),
-        ("ACT Pipeline (Review & Consolidation)", [
-            ("critique",    "[Phase 2] Reviews .syn and emits .synr with # REVISION blocks"),
-            ("normalize",   "[Phase 3] Canonicalizes codes cross-corpus"),
-            ("incorporate", "[Phase 4] Applies .synr revisions and emits the final .syn"),
-            ("refine",      "[Phase R] Re-extracts flagged ITEMs with critique feedback (opt-in, LLM)"),
         ]),
     ]
 
@@ -219,10 +229,20 @@ def _build_main_help() -> str:
         _render_group(label, rows) for label, rows in groups
     )
 
-    notes = _c(
-        "  [--prompt-only]  Writes the assembled prompt (template GUIDELINES included)\n"
-        "                   to a Markdown file and exits. No LLM call, no tokens spent.",
-        fg="bright_black",
+    notes = (
+        _c("Common flags:", fg="yellow", bold=True) + "\n"
+        + _c(
+            "  --prompt-only    Writes the assembled prompt (template GUIDELINES included)\n"
+            "                   to Markdown and exits. No LLM call, no tokens spent.\n"
+            "  --debug          Writes a Markdown audit log of the whole LLM pipeline.\n"
+            "\n"
+            "Long runs (abstract):\n"
+            "  --resume         Skips references already annotated in --output-dir.\n"
+            "  --split-every N  Writes N references per file instead of one big file.\n"
+            "  --per-reference  Writes one .syn per reference.\n"
+            "  --cooldown       Pause between batches: 'auto', seconds, or 0 to disable.",
+            fg="bright_black",
+        )
     )
 
     hint = _c(
@@ -230,7 +250,7 @@ def _build_main_help() -> str:
         fg="bright_black",
     )
 
-    return "\n\n".join([title, desc, usage, options, commands, notes, hint]) + "\n"
+    return "\n\n".join([title, credits, usage, options, commands, notes, hint]) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -283,14 +303,20 @@ _EPILOG_ITEM = _ex(
 
 _EPILOG_ABSTRACT = _ex(
     "",
-    "  # Process all abstracts from a .bib corpus:",
+    "  # Process all abstracts from a .bib corpus (one annotations.syn):",
     "  synesis-coder abstract --project project.synp --input refs.bib --output-dir annotations/",
     "",
-    "  # One .syn file per reference:",
-    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir annotations/ --per-reference",
+    "  # Output layout — pick ONE:",
+    "  #   one .syn per reference (easiest to review and re-run individually)",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir out/ --per-reference",
+    "  #   N references per file",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir out/ --split-every 100",
     "",
-    "  # Control concurrency and batch size:",
-    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir annotations/ --concurrent 3 --batch-size 10",
+    "  # Long campaigns: resume after an interruption (skips what is already done):",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir out/ --per-reference --resume",
+    "",
+    "  # Control concurrency, batch size and the pause between batches:",
+    "  synesis-coder abstract --project p.synp --input refs.bib --output-dir out/ --concurrent 3 --batch-size 10 --cooldown auto",
     "",
     "  # Inspect the assembled prompt without calling the LLM (review the template GUIDELINES):",
     "  synesis-coder abstract --project p.synp --input refs.bib --prompt-only",
@@ -553,9 +579,25 @@ def item(project, bibref, text, output_format, model, thinking_budget,
 @click.option("--prompt-only", "prompt_only", is_flag=True, default=False,
               help="Write the assembled prompt as Markdown and exit. No LLM call. "
                    "Destination: <project>_abstract_prompt.md, or --output-dir if given.")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Replace an existing annotations.syn without asking. "
+                   "Checked once, before any API call.")
+@click.option("--backup", is_flag=True, default=False,
+              help="Copy an existing annotations.syn to .syn.bak before writing.")
+@click.option("--cooldown", default="auto", show_default=True,
+              help="Pause between batches: 'auto' (10% of each batch's duration, "
+                   "5-30s), a fixed number of seconds, or 0 to disable.")
+@click.option("--resume", is_flag=True, default=False,
+              help="Skip references already processed successfully in --output-dir. "
+                   "State comes from the .syn files themselves; failed records are "
+                   "reprocessed.")
+@click.option("--split-every", "split_every", default=None, type=int,
+              help="Write N references per file (annotations_0001.syn, ...) instead "
+                   "of one combined file. Cuts only at record boundaries. "
+                   "Mutually exclusive with --per-reference.")
 def abstract(project, bib_path, output_dir, concurrent, batch_size, per_reference,
              output_format, model, thinking_budget, language, max_tokens, temperature,
-             debug, prompt_only):
+             debug, prompt_only, overwrite, backup, cooldown, resume, split_every):
     """Process a .bib corpus in batch, generating Synesis annotations (SOURCE + ITEMs)."""
     from synesis_coder.modes.abstract_mode import process_abstract
 
@@ -576,13 +618,18 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
                                   output_dir=output_dir, concurrent=concurrent,
                                   batch_size=batch_size, per_reference=per_reference,
                                   model=model, format=output_format, debug=debug,
-                                  prompt_only=prompt_only)
+                                  prompt_only=prompt_only,
+                                  overwrite=overwrite, backup=backup,
+                                  cooldown=cooldown, resume=resume,
+                                  split_every=split_every)
         if prompt_only:
             # --output-dir é uma PASTA neste modo; o dump é um arquivo dentro dela.
             dest = (output_dir / f"{project.stem}_abstract_prompt.md") if output_dir else None
             _emit_prompt(result, project, "abstract", dest)
         else:
             click.echo(result)
+    except FileExistsError as exc:
+        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except Exception as exc:
@@ -775,29 +822,100 @@ def ontology(project, output_path, update, concurrent, output_format, model,
               help="Output path for the .synr file. Defaults to same name as .syn with .synr extension.")
 @click.option("--concurrent", default=3, show_default=True,
               help="Maximum number of simultaneous LLM calls.")
+@click.option("--sensitivity", default=None,
+              help="How readily to flag: lenient | standard | strict, or a number [0.0-1.0]. "
+                   "Default: standard (0.20).")
 @click.option("--threshold", "suspicion_threshold", default=None, type=float,
-              help="Minimum suspicion score to emit a # REVISION block [0.0–1.0]. Default: 0.20.")
+              help="[deprecated] Numeric form of --sensitivity.")
 @click.option("--format", "output_format", type=click.Choice(["plain", "verbose"]),
               default="plain", show_default=True, help="Summary output format.")
 @click.option("--model", default=None,
               help="LLM model ID (overrides SYNESIS_CODER_CRITIQUE_MODEL).")
 @click.option("--debug", "debug_mode", is_flag=True, default=False,
               help="Enable DEBUG log with raw LLM response per ITEM.")
-def critique(syn_file, project_path, output_path, concurrent, suspicion_threshold,
-             output_format, model, debug_mode):
+def critique(syn_file, project_path, output_path, concurrent, sensitivity,
+             suspicion_threshold, output_format, model, debug_mode):
     """[ACT Phase 2] Review .syn annotations and emit .synr with correction suggestions."""
     from synesis_coder.modes.critique_mode import process_critique
+    from synesis_coder.revision_vocab import resolve_sensitivity
 
     try:
         resolved_model = model or _validate_phase_env("critique")
-        if suspicion_threshold is None:
-            suspicion_threshold = float(
-                os.environ.get("SYNESIS_CODER_SUSPICION_THRESHOLD", "0.20")
-            )
+        # Precedência: --sensitivity > --threshold (legado) > env > default.
+        raw_sensitivity = sensitivity
+        if raw_sensitivity is None and suspicion_threshold is not None:
+            raw_sensitivity = suspicion_threshold
+        if raw_sensitivity is None:
+            raw_sensitivity = os.environ.get("SYNESIS_CODER_SUSPICION_THRESHOLD")
+        suspicion_threshold, _ = resolve_sensitivity(raw_sensitivity)
         click.echo(process_critique(syn_path=syn_file, project_path=project_path,
                                     output_path=output_path, concurrent=concurrent,
                                     model=resolved_model, suspicion_threshold=suspicion_threshold,
                                     format=output_format, debug=debug_mode))
+    except (FileNotFoundError, ValueError, EnvironmentError) as exc:
+        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+
+
+_EPILOG_ANCHOR = _ex(
+    "",
+    "  # Check every ITEM excerpt against its source abstract:",
+    "  synesis-coder anchor annotations.syn --project project.synp",
+    "",
+    "  # Fail the build when any excerpt is not anchored (CI):",
+    "  synesis-coder anchor annotations.syn --project p.synp --strict",
+    "",
+    "  # Check a field other than `text`:",
+    "  synesis-coder anchor annotations.syn --project p.synp --field quotation",
+)
+
+
+@main.command(epilog=_EPILOG_ANCHOR)
+@click.argument("syn_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--project", "project_path", default=None,
+              type=click.Path(exists=True, path_type=Path),
+              help="Path to the .synp file. Auto-detected from the .syn directory if omitted.")
+@click.option("--field", default="text", show_default=True,
+              help="ITEM field holding the source excerpt.")
+@click.option("--strict", is_flag=True, default=False,
+              help="Exit with code 1 when any excerpt is not anchored.")
+def anchor(syn_file, project_path, field, strict):
+    """Check that each ITEM excerpt occurs in its source abstract.
+
+    Deterministic and free — no LLM call. Complements the compiler, which
+    already validates enums, ranges, REQUIRED fields, BUNDLE and chain
+    relations, but does not verify that the annotated excerpt exists in the
+    source.
+    """
+    from synesis_coder.anchor_check import check_anchoring, format_report
+    from synesis_coder.modes.critique_mode import _resolve_project
+
+    try:
+        resolved = _resolve_project(Path(syn_file), project_path)
+        if resolved is None:
+            click.echo(
+                "Erro: projeto .synp não encontrado. Use --project.", err=True
+            )
+            sys.exit(1)
+
+        from synesis_coder.project_loader import load_project
+        ctx = load_project(resolved, load_annotations=False)
+        bib_content = ctx.get("bib_content") or ""
+        if not bib_content:
+            click.echo(
+                "Erro: projeto sem bibliografia — não há fonte para ancorar.",
+                err=True,
+            )
+            sys.exit(1)
+
+        content = Path(syn_file).read_text(encoding="utf-8")
+        total = len(re.findall(r"^ITEM\s+@\S+\s*$", content, re.MULTILINE))
+        issues = check_anchoring(content, bib_content, field=field)
+        click.echo(format_report(issues, total))
+
+        if issues and strict:
+            sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Erro: {exc}", err=True); sys.exit(1)
     except Exception as exc:
