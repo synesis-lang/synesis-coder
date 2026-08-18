@@ -1,0 +1,31 @@
+version: 2
+
+# Atualizacoes automaticas de versao DESLIGADAS.
+#
+# O Dependabot abria PRs continuamente e o ruido superava o ganho: as
+# dependencias de runtime deste pacote sao poucas e estaveis, e as GitHub
+# Actions estao pinadas por SHA de commit (ver .github/workflows/ci.yml), de
+# modo que um bump de tag nao muda o que roda no CI.
+#
+# O que este arquivo NAO desliga: os *security updates* do Dependabot, que sao
+# controlados em Settings > Code security e continuam ativos. Alertas de
+# vulnerabilidade seguem chegando, e o job `security` do CI roda `pip-audit`
+# a cada push. Desligar as duas coisas deixaria as actions pinadas sem nenhum
+# caminho de atualizacao — pin sem auditoria e um risco, nao uma protecao.
+#
+# Para religar as atualizacoes de versao, substitua os blocos abaixo por
+# `schedule: {interval: "weekly"}` e remova o `open-pull-requests-limit: 0`.
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 0 = nenhum PR de atualizacao de versao.
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
