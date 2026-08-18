@@ -1,6 +1,6 @@
 [project]
 name = "synesis-coder"
-version = "0.8.0"
+version = "0.9.0"
 description = "LLM-assisted annotation pipeline for the Synesis ecosystem"
 readme = "README.md"
 requires-python = ">=3.10"
