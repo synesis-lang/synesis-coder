@@ -1067,6 +1067,7 @@ def build_critique_prompt(
     ctx: dict,
     item_block: str,
     source_text: str,
+    item_position: Optional[tuple] = None,
 ) -> List[dict]:
     """Monta as mensagens para revisão crítica de um bloco ITEM.
 
@@ -1080,7 +1081,9 @@ def build_critique_prompt(
     Args:
         ctx: Contexto do projeto retornado por load_project().
         item_block: Texto completo do bloco ITEM a revisar.
-        source_text: Texto-fonte original (abstract ou campo text do ITEM).
+        source_text: Texto-fonte. Quando contém `<target>`, a avaliação é
+            restrita ao trecho delimitado (ver critique_mode._build_critique_source).
+        item_position: (n, total) do ITEM dentro do bibref, quando conhecido.
 
     Returns:
         Lista de dicts no formato interno:
@@ -1090,7 +1093,7 @@ def build_critique_prompt(
         ]
     """
     system_text = _build_critique_system_prompt(ctx)
-    user_text = _build_critique_user_message(item_block, source_text)
+    user_text = _build_critique_user_message(item_block, source_text, item_position)
 
     return [
         {"role": "system", "content": system_text, "cache": True},
@@ -1110,7 +1113,7 @@ def _build_critique_system_prompt(ctx: dict) -> str:
         "- Output ONLY the structured critique lines shown below — nothing else\n"
         "- Do NOT generate Synesis annotation blocks (ITEM, SOURCE, ONTOLOGY)\n"
         "- Do NOT add explanations, headers or any text outside the output format\n"
-        "- If you find no issues, still output the suspicion_score and reason lines"
+        "- If you find no issues, still output the divergence and reason lines"
     )
 
     if ctx.get("project_description"):
@@ -1163,14 +1166,20 @@ def _build_critique_output_format(ctx: dict) -> str:
         if spec.type.name not in ("QUOTATION",)
     ]
 
+    from synesis_coder.critique_taxonomy import build_taxonomy_section
+
     lines = [
         "OUTPUT FORMAT — respond with ONLY these lines, nothing else:",
         "",
-        "  # $suspicion_score: [0.00-1.00]",
-        "  # $reason: [none|anchor_missing|mechanism_unsupported|wrong_direction"
-        "|optional_field_unfounded|granularity_violation]",
-        "  # $reason_detail: [optional free-text explanation — use this, NOT # $note:]",
+        "  # $divergence: [0.00-1.00]",
+        "  # $reason: [one of the categories below]",
+        "  # $comment: [optional free-text explanation — use this, NOT # $note:]",
     ]
+
+    taxonomy = build_taxonomy_section(item_fields, ctx.get("required_item"))
+    if taxonomy:
+        lines.append("")
+        lines.append(taxonomy)
 
     if correctable_fields:
         lines.append("")
@@ -1186,7 +1195,7 @@ def _build_critique_output_format(ctx: dict) -> str:
         lines.append("")
         lines.append("IMPORTANT RULES FOR FIELD CORRECTIONS:")
         lines.append(
-            "  - NEVER output # $note: — use # $reason_detail: for explanations instead."
+            "  - NEVER output # $note: — use # $comment: for explanations instead."
         )
         lines.append(
             "  - When a field appears multiple times (e.g. multiple `chain:` lines in one ITEM),\n"
@@ -1210,16 +1219,66 @@ def _build_critique_output_format(ctx: dict) -> str:
         "  0.71-1.00  → serious issue — annotation misrepresents or contradicts source"
     )
 
+    lines.append("")
+    lines.append("DEFERENCE RULE — read before assigning any score above 0.15:")
+    lines.append(
+        "  Your task is to detect annotations that VIOLATE the template's stated\n"
+        "  rules — NOT to apply a stricter standard than the template declares.\n"
+        "\n"
+        "  - If the template ADMITS the existing annotation under a reasonable\n"
+        "    reading, assign 0.00-0.15 with reason `none` — even when a different\n"
+        "    reading would also be defensible, and even when you would personally\n"
+        "    have annotated it differently.\n"
+        "  - Preferring an alternative is NOT a defect. Only flag what the\n"
+        "    template's own guidelines rule out.\n"
+        "  - Do not require precision the guidelines do not ask for: if a rule\n"
+        "    does not state a threshold, a magnitude or a direction, its absence\n"
+        "    in the annotation is not a violation.\n"
+        "  - Most annotations in a well-built corpus are correct. Finding no\n"
+        "    issue is the expected outcome, not a failure to review carefully."
+    )
+
     return "\n".join(lines)
 
 
-def _build_critique_user_message(item_block: str, source_text: str) -> str:
-    """Constrói a mensagem dinâmica do usuário para o critique de um ITEM."""
+def _build_critique_user_message(
+    item_block: str,
+    source_text: str,
+    item_position: Optional[tuple] = None,
+) -> str:
+    """Constrói a mensagem dinâmica do usuário para o critique de um ITEM.
+
+    Quando `source_text` traz um `<target>`, a instrução restringe a avaliação
+    ao trecho delimitado: o entorno serve só para desambiguar referências, não
+    para cobrar cobertura do que está fora dele.
+    """
+    position_note = ""
+    if item_position:
+        n, total = item_position
+        if total > 1:
+            position_note = (
+                f"\nThis is ITEM {n} of {total} annotating this same source. "
+                "Each ITEM covers a DIFFERENT excerpt — do not fault this one "
+                "for content that other ITEMs cover.\n"
+            )
+
+    if "<target>" in source_text:
+        scope_note = (
+            "Evaluate ONLY the passage inside <target>...</target>. The "
+            "surrounding text is context to disambiguate references — never "
+            "fault the ITEM for failing to cover content outside <target>."
+        )
+    else:
+        scope_note = (
+            "Evaluate whether the ITEM fields accurately represent the SOURCE "
+            "TEXT according to the guidelines."
+        )
+
     return (
-        f"SOURCE TEXT:\n<source>{source_text}</source>\n\n"
+        f"SOURCE TEXT:\n<source>{source_text}</source>\n"
+        f"{position_note}\n"
         f"ITEM TO REVIEW:\n{item_block.strip()}\n\n"
-        "Evaluate whether the ITEM fields accurately represent the SOURCE TEXT "
-        "according to the guidelines. Output the structured critique."
+        f"{scope_note} Output the structured critique."
     )
 
 
@@ -1228,10 +1287,9 @@ def _build_critique_user_message(item_block: str, source_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Meta-tags do critique que descrevem o diagnóstico, não sugestões de campo.
-# Espelha _META_TAGS de incorporate_mode: estas nunca são "field hints".
-_CRITIQUE_META_TAGS = frozenset(
-    {"suspicion_score", "reason", "reason_detail", "note", "phase"}
-)
+# Fonte única compartilhada com incorporate_mode — antes eram duas constantes
+# literais duplicadas que nada mantinha sincronizadas (Estudo §9.3).
+from synesis_coder.revision_vocab import META_TAGS as _CRITIQUE_META_TAGS  # noqa: E402
 
 
 def build_item_refinement_prompt(
