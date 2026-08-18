@@ -39,7 +39,16 @@ _log = logging.getLogger(__name__)
 # `note` é incluída porque o LLM de critique usa `# $note:` como raciocínio
 # (reason_detail), não como substituição do campo `note:` do ITEM.
 # `reason_detail` é o tag explícito para explicações livres do LLM.
-_META_TAGS = frozenset({"suspicion_score", "reason", "reason_detail", "note", "phase"})
+# Fonte única, compartilhada com prompt_builder. Inclui os nomes do formato 1
+# (suspicion_score, reason_detail) para que .synr antigos sigam legíveis, e o
+# cabeçalho do .synr — sem o qual um template com campo homônimo receberia o
+# metadado da revisão como se fosse correção de campo.
+from synesis_coder.revision_vocab import META_TAGS as _META_TAGS  # noqa: E402
+
+# Valores que o LLM emite para pedir a REMOÇÃO de uma ocorrência de campo.
+# O formato de correção não previa remoção; modelos improvisaram `none` e
+# `(none)` no corpus face85. Sem tratamento, a string seria gravada como valor.
+_REMOVAL_SENTINELS = frozenset({"none", "(none)", "-", "n/a", "null"})
 
 # Regex que captura uma linha de campo Synesis: indentação + nome + : + valor
 _FIELD_LINE_RE = re.compile(r"^(\s*)([\w]+)(\s*:\s*)(.*)$")
@@ -97,28 +106,43 @@ def _replace_field_value(
     item_block: str,
     field_name: str,
     new_value: str,
+    consumed: Optional[set[int]] = None,
 ) -> Optional[str]:
-    """Substitui o valor de um campo dentro de um bloco ITEM.
+    """Substitui (ou remove) o valor de um campo dentro de um bloco ITEM.
 
     Faz match case-insensitive no nome do campo. Quando há múltiplas ocorrências
-    do mesmo campo (ex: vários `chain:` num ITEM complexo), tenta encontrar a
-    ocorrência cujo valor atual é o prefixo-raiz da sugestão — ou seja, a
-    ocorrência que o LLM estava endereçando.
+    do mesmo campo (ex: vários `chain:` num ITEM complexo), casa pela ocorrência
+    cujo valor atual compartilha o nó-fonte da sugestão — a ocorrência que o LLM
+    estava endereçando.
 
     Estratégia de match quando há múltiplas ocorrências:
-    1. Prefere a linha cujo valor atual aparece no início de new_value (match semântico).
-    2. Fallback: primeira ocorrência do campo.
+    1. Casa a linha cujo nó-fonte é igual ao da sugestão, ignorando as linhas já
+       consumidas por uma correção anterior.
+    2. **Sem casamento → retorna None** (correção rejeitada).
+
+    O passo 2 é deliberado. A versão anterior caía na primeira ocorrência, o que
+    aplicava a correção a uma chain que ela não endereçava — destruindo o valor
+    original em silêncio enquanto o alvo real sobrevivia intacto. Ver
+    Estudo_Critique_Escopo_e_Taxonomia §5 (caso souza2022c).
+
+    Com ocorrência ÚNICA o casamento não é exigido: não há ambiguidade possível.
 
     Args:
         item_block: Texto completo do bloco ITEM.
         field_name: Nome do campo a substituir (ex: "chain", "code").
-        new_value: Novo valor sugerido pelo LLM.
+        new_value: Novo valor sugerido pelo LLM. Um valor em _REMOVAL_SENTINELS
+            remove a linha casada em vez de substituí-la.
+        consumed: Índices de linha já alterados por correções anteriores neste
+            mesmo ITEM. Mutado in-place com o índice consumido. None desabilita
+            o rastreamento (uma correção isolada).
 
     Returns:
-        Bloco modificado, ou None se o campo não foi encontrado.
+        Bloco modificado, ou None se o campo não foi encontrado ou se o
+        casamento foi ambíguo.
     """
     field_lower = field_name.lower()
     lines = item_block.splitlines(keepends=True)
+    consumed_set = consumed if consumed is not None else set()
 
     # Coletar todas as posições de ocorrência do campo
     candidate_indices: list[int] = []
@@ -134,28 +158,104 @@ def _replace_field_value(
     if not candidate_indices:
         return None
 
-    # Selecionar qual ocorrência substituir
-    target_idx = candidate_indices[0]  # fallback: primeira
+    available = [
+        (idx, val)
+        for idx, val in zip(candidate_indices, candidate_values)
+        if idx not in consumed_set
+    ]
+    if not available:
+        _log.warning(
+            "Campo '%s': todas as ocorrências já foram consumidas por correções "
+            "anteriores — sugestão rejeitada (mais correções que ocorrências)",
+            field_name,
+        )
+        return None
 
-    if len(candidate_indices) > 1:
-        new_val_lower = new_value.strip().lower()
-        for i, (idx, old_val) in enumerate(zip(candidate_indices, candidate_values)):
-            # Extrai o nó-fonte da sugestão (primeiro token antes de ->)
-            new_root = new_val_lower.split("->")[0].strip()
-            old_root = old_val.lower().split("->")[0].strip()
-            if new_root and old_root and old_root == new_root:
-                target_idx = idx
-                break
+    target_idx: Optional[int] = None
 
-    # Substituir na linha escolhida
+    if len(available) == 1 and len(candidate_indices) == 1:
+        # Ocorrência única no bloco: não há ambiguidade a resolver.
+        target_idx = available[0][0]
+    else:
+        new_root = _source_node(new_value)
+        matches = [
+            idx for idx, old_val in available
+            if new_root and _source_node(old_val) == new_root
+        ]
+
+        if len(matches) == 1:
+            target_idx = matches[0]
+        elif not matches:
+            _log.warning(
+                "Campo '%s' com %d ocorrências: nenhuma casa o nó-fonte de '%s' "
+                "— sugestão rejeitada (alvo não identificável)",
+                field_name,
+                len(candidate_indices),
+                new_value,
+            )
+            return None
+        else:
+            # Várias ocorrências compartilham o nó-fonte — o padrão normal de
+            # APPLIES no corpus. O casamento por raiz NÃO as distingue, e
+            # escolher a primeira destruiria uma chain que a correção não
+            # endereçava (estudo §5, souza2022c). Rejeitar é a única ação segura.
+            _log.warning(
+                "Campo '%s': %d ocorrências compartilham o nó-fonte %r — a correção "
+                "%r não identifica qual substituir; sugestão rejeitada. O formato de "
+                "correção precisa nomear a ocorrência original.",
+                field_name,
+                len(matches),
+                new_root,
+                new_value,
+            )
+            return None
+
     result = list(lines)
     m = _FIELD_LINE_RE.match(lines[target_idx].rstrip("\r\n"))
-    if m:
-        indent, fname, sep, _ = m.groups()
-        eol = "\n" if lines[target_idx].endswith("\n") else ""
-        result[target_idx] = f"{indent}{fname}{sep}{new_value}{eol}"
+    if not m:
+        return None
+
+    if _is_removal(new_value):
+        del result[target_idx]
+        # Índices consumidos após a remoção deslocam-se uma posição.
+        if consumed is not None:
+            shifted = {i if i < target_idx else i - 1 for i in consumed}
+            consumed.clear()
+            consumed.update(shifted)
+        return "".join(result)
+
+    indent, fname, sep, _ = m.groups()
+    eol = "\n" if lines[target_idx].endswith("\n") else ""
+    result[target_idx] = f"{indent}{fname}{sep}{new_value}{eol}"
+
+    if consumed is not None:
+        consumed.add(target_idx)
 
     return "".join(result)
+
+
+def _field_occurs(item_block: str, field_name: str) -> bool:
+    """True se o campo aparece ao menos uma vez no bloco ITEM."""
+    field_lower = field_name.lower()
+    for line in item_block.splitlines():
+        m = _FIELD_LINE_RE.match(line.rstrip("\r\n"))
+        if m and m.group(2).lower() == field_lower:
+            return True
+    return False
+
+
+def _source_node(value: str) -> str:
+    """Extrai o nó-fonte de uma chain (primeiro token antes de '->'), normalizado.
+
+    Para campos não-CHAIN o valor inteiro é o 'nó-fonte' — o que faz o casamento
+    exigir igualdade literal, corretamente conservador para múltiplas ocorrências.
+    """
+    return value.split("->")[0].strip().lower()
+
+
+def _is_removal(new_value: str) -> bool:
+    """True quando a sugestão pede remoção da ocorrência em vez de substituição."""
+    return new_value.strip().lower() in _REMOVAL_SENTINELS
 
 
 def _validate_item_block(item_block: str, ctx: dict) -> bool:
@@ -199,17 +299,48 @@ def _apply_revision_tags(
     changed = 0
     rejected = 0
 
+    # Índices de linha já alterados neste ITEM, por campo. Impede que duas
+    # correções do mesmo campo colidam na mesma linha (sobrescrita silenciosa).
+    consumed_by_field: dict[str, set[int]] = {}
+    # Valores já aplicados por campo — correções byte-idênticas são rascunho do
+    # modelo, não duas correções legítimas (ver estudo §5, caso souza2022c).
+    seen_by_field: dict[str, set[str]] = {}
+
     for key, new_value in tags.items():
         # Normaliza chaves numeradas (ex: "chain.1" → campo "chain")
         base_key = key.split(".")[0] if re.match(r"^[\w]+\.\d+$", key) else key
         if base_key in _META_TAGS or key.startswith("metrics."):
             continue
 
-        candidate = _replace_field_value(modified, base_key, new_value)
-        if candidate is None:
+        normalized = new_value.strip()
+        seen = seen_by_field.setdefault(base_key, set())
+        if normalized in seen:
+            _log.warning(
+                "Campo '%s': correção duplicada (byte-idêntica) descartada — %r",
+                base_key,
+                normalized,
+            )
+            rejected += 1
+            continue
+
+        # Campo ausente do ITEM: sugestão inaplicável, não conflito. Mantido
+        # como "ignorada" (não conta como rejeição) — contrato pré-Fase 1.
+        if not _field_occurs(modified, base_key):
             _log.debug(
                 "Campo '%s' não encontrado no bloco ITEM — sugestão ignorada", base_key
             )
+            continue
+
+        consumed = consumed_by_field.setdefault(base_key, set())
+        # Trabalha sobre uma cópia: o consumo só é confirmado se a correção
+        # sobreviver à validação Synesis.
+        trial = set(consumed)
+        candidate = _replace_field_value(modified, base_key, new_value, trial)
+        if candidate is None:
+            # Campo existe mas a correção não pôde ser endereçada com segurança
+            # (casamento ambíguo ou ocorrências esgotadas). _replace_field_value
+            # já registrou o motivo. Isto É uma rejeição.
+            rejected += 1
             continue
 
         if ctx is not None:
@@ -220,6 +351,10 @@ def _apply_revision_tags(
         if ok:
             modified = candidate
             changed += 1
+            seen.add(normalized)
+            # Confirma o consumo apenas quando a correção é de fato aplicada.
+            consumed.clear()
+            consumed.update(trial)
             _log.debug("Campo '%s' atualizado para: %s", base_key, new_value)
         else:
             _log.warning(
@@ -402,18 +537,26 @@ def _build_metrics_header(
 
     # --- Fase anterior (critique ou normalize), se disponível no .synr --------
     prior_phase = synr_header.get("phase")
-    if prior_phase in ("critique", "normalize"):
+    # "review" é o nome do formato 2; "critique" o do formato 1.
+    if prior_phase in ("review", "critique", "normalize"):
         lines.append(f"# --- Fase anterior: {prior_phase} ---")
         _copy_header_metric(lines, synr_header, "model", f"modelo LLM usado na fase {prior_phase}")
         _copy_header_metric(lines, synr_header, "timestamp", "data/hora de execucao da fase")
 
-        if prior_phase == "critique":
+        if prior_phase in ("review", "critique"):
+            # Cada par (formato 2, formato 1): o que existir é copiado.
+            _copy_header_metric(lines, synr_header, "sensitivity",
+                "sensibilidade da revisao (lenient/standard/strict)")
             _copy_header_metric(lines, synr_header, "threshold",
-                "limiar de suspicion_score acima do qual o ITEM recebeu # REVISION")
+                "limiar de divergencia acima do qual o ITEM recebeu # REVISION")
             _copy_header_metric(lines, synr_header, "metrics.items_total",
-                "total de blocos ITEM avaliados pelo modelo de critique")
+                "total de blocos ITEM avaliados pelo revisor")
+            _copy_header_metric(lines, synr_header, "metrics.items_to_review",
+                "ITEMs com divergencia acima da sensibilidade")
             _copy_header_metric(lines, synr_header, "metrics.items_flagged",
-                "ITEMs com suspicion_score >= threshold")
+                "ITEMs com suspicion_score >= threshold (formato 1)")
+            _copy_header_metric(lines, synr_header, "metrics.agreement",
+                "proporcao de ITEMs sem divergencia; abaixo de 0.70 sugere revisor descalibrado")
             _copy_header_metric_with_formula(
                 lines, synr_header,
                 "metrics.suspicion_rate",

@@ -89,7 +89,12 @@ class TestReplaceFieldValue:
         result = _replace_field_value(_ITEM_CHAIN, "CHAIN", "New -> REL -> Value")
         assert "New -> REL -> Value" in result
 
-    def test_replaces_only_first_occurrence(self):
+    def test_ambiguous_multiple_occurrences_rejected(self):
+        """Múltiplas ocorrências sem casamento de nó-fonte → rejeita.
+
+        Antes da Fase 1 isto caía na PRIMEIRA ocorrência, destruindo um valor
+        que a correção não endereçava. Ver estudo §5 (souza2022c).
+        """
         block = textwrap.dedent("""\
             ITEM @ref
                 note: first
@@ -97,9 +102,98 @@ class TestReplaceFieldValue:
             END ITEM
         """)
         result = _replace_field_value(block, "note", "replaced")
-        assert result.count("replaced") == 1
-        assert "first" not in result
-        assert "second" in result
+        assert result is None
+
+    def test_matches_occurrence_by_source_node(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+                chain: B -> ENABLES -> Y
+            END ITEM
+        """)
+        result = _replace_field_value(block, "chain", "B -> INHIBITS -> Y")
+        assert "B -> INHIBITS -> Y" in result
+        assert "A -> ENABLES -> X" in result  # intacta
+        assert "B -> ENABLES -> Y" not in result
+
+    def test_exact_value_match_disambiguates_non_chain(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                note: first
+                note: second
+            END ITEM
+        """)
+        result = _replace_field_value(block, "note", "second")
+        assert result is not None
+        assert result.count("second") == 1
+        assert "first" in result
+
+    def test_consumed_index_not_reused(self):
+        """Correções de nós-fonte distintos consomem linhas distintas."""
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+                chain: B -> ENABLES -> Y
+            END ITEM
+        """)
+        consumed: set[int] = set()
+        first = _replace_field_value(block, "chain", "A -> INHIBITS -> X", consumed)
+        assert first is not None
+        assert len(consumed) == 1
+        second = _replace_field_value(first, "chain", "B -> INHIBITS -> Y", consumed)
+        assert second is not None
+        assert len(consumed) == 2
+        assert second.count("INHIBITS") == 2
+
+    def test_shared_source_node_rejected(self):
+        """Nó-fonte compartilhado não identifica o alvo → rejeita.
+
+        Padrão normal de APPLIES no corpus. Escolher a primeira destruiria uma
+        chain que a correção não endereçava (estudo §5, souza2022c).
+        """
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+                chain: A -> ENABLES -> Y
+            END ITEM
+        """)
+        result = _replace_field_value(block, "chain", "A -> INHIBITS -> X")
+        assert result is None
+
+    def test_more_corrections_than_occurrences_rejected(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+            END ITEM
+        """)
+        consumed: set[int] = set()
+        first = _replace_field_value(block, "chain", "A -> INHIBITS -> X", consumed)
+        assert first is not None
+        second = _replace_field_value(first, "chain", "A -> BLOCKS -> X", consumed)
+        assert second is None
+
+    def test_removal_sentinel_deletes_line(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                text: keep me
+                chain: A -> ENABLES -> X
+            END ITEM
+        """)
+        result = _replace_field_value(block, "chain", "none")
+        assert result is not None
+        assert "chain:" not in result
+        assert "text: keep me" in result
+        assert "none" not in result
+
+    def test_removal_sentinel_parenthesized(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+            END ITEM
+        """)
+        result = _replace_field_value(block, "chain", "(none)")
+        assert result is not None
+        assert "chain:" not in result
 
     def test_does_not_modify_unrelated_fields(self):
         result = _replace_field_value(_ITEM_CHAIN, "note", "New note content")
@@ -269,6 +363,124 @@ class TestApplyRevisionTags:
         modified, changed, rejected = _apply_revision_tags(_ITEM_CHAIN, tags, ctx=None)
         assert changed == 1
         assert "A -> B -> C" in modified
+
+    # --- Fase 1: integridade da incorporação --------------------------------
+
+    def test_synr_header_tags_never_applied_as_fields(self):
+        """model/timestamp/threshold são cabeçalho do .synr, não correções.
+
+        Um template pode declarar um campo homônimo (projetos de ML, história,
+        metodologia). Sem estes em _META_TAGS, o metadado da revisão viraria
+        valor do campo do ITEM.
+        """
+        block = textwrap.dedent("""\
+            ITEM @ref
+                model: theoretical_sampling
+                timestamp: 1998
+                threshold: low
+            END ITEM
+        """)
+        tags = {
+            "model": "openai/gpt-5.6-luna",
+            "timestamp": "2026-08-17T17:29:18Z",
+            "threshold": "0.2",
+        }
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+        assert modified == block
+        assert changed == 0
+        assert "theoretical_sampling" in modified
+        assert "openai/gpt-5.6-luna" not in modified
+
+    def test_byte_identical_corrections_deduplicated(self):
+        """Correções idênticas são rascunho do modelo, não duas correções."""
+        block = textwrap.dedent("""\
+            ITEM @souza2022c
+                chain: estudo -> APPLIES -> qualidade
+                chain: estudo -> APPLIES -> governanca
+                chain: estudo -> APPLIES -> desempenho
+            END ITEM
+        """)
+        tags = {
+            "chain": "estudo -> APPLIES -> estruturas_de_governanca",
+            "chain.1": "estudo -> APPLIES -> estruturas_de_governanca",
+        }
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+        # A 2ª é descartada como duplicata antes de qualquer tentativa; a 1ª é
+        # rejeitada à parte por nó-fonte compartilhado entre as 3 chains.
+        assert changed == 0
+        assert rejected == 2
+        assert "estruturas_de_governanca" not in modified
+
+    def test_souza2022c_no_silent_data_loss(self):
+        """Reproduz o caso do estudo §5: correção não destrói chain alheia.
+
+        Antes da Fase 1 a correção casava pelo nó-fonte compartilhado, parava na
+        PRIMEIRA linha e sobrescrevia `qualidade` — que não era o alvo — enquanto
+        `governanca`, o alvo real, sobrevivia intacto.
+        """
+        block = textwrap.dedent("""\
+            ITEM @souza2022c
+                chain: estudo -> APPLIES -> qualidade
+                chain: estudo -> APPLIES -> governanca
+                chain: estudo -> APPLIES -> desempenho
+            END ITEM
+        """)
+        tags = {"chain": "estudo -> APPLIES -> estruturas_de_governanca"}
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+
+        # Três chains compartilham o nó-fonte 'estudo': o casamento por raiz NÃO
+        # identifica o alvo. Rejeitar é a única ação segura — aplicar destruiria
+        # `qualidade`, que a correção não endereçava.
+        assert modified == block
+        assert changed == 0
+        assert rejected == 1
+        assert "qualidade" in modified
+        assert "desempenho" in modified
+
+    def test_removal_sentinel_removes_chain(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                text: mantido
+                chain: A -> ENABLES -> X
+            END ITEM
+        """)
+        tags = {"chain": "none"}
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+        assert changed == 1
+        assert "chain:" not in modified
+        assert "text: mantido" in modified
+
+    def test_more_corrections_than_occurrences_counted_as_rejected(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+            END ITEM
+        """)
+        tags = {
+            "chain": "A -> INHIBITS -> X",
+            "chain.1": "A -> BLOCKS -> X",
+        }
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+        assert changed == 1
+        assert rejected == 1
+        assert modified.count("chain:") == 1
+
+    def test_two_corrections_distinct_source_nodes_both_applied(self):
+        block = textwrap.dedent("""\
+            ITEM @ref
+                chain: A -> ENABLES -> X
+                chain: B -> ENABLES -> Y
+            END ITEM
+        """)
+        tags = {
+            "chain": "A -> INHIBITS -> X",
+            "chain.1": "B -> INHIBITS -> Y",
+        }
+        modified, changed, rejected = _apply_revision_tags(block, tags, ctx=None)
+        assert changed == 2
+        assert rejected == 0
+        assert "A -> INHIBITS -> X" in modified
+        assert "B -> INHIBITS -> Y" in modified
 
 
 # ---------------------------------------------------------------------------
