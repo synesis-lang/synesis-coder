@@ -26,9 +26,16 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from synesis_coder.critique_taxonomy import VALID_REASONS, validate_reason
 from synesis_coder.llm_client import LLMClient, get_critique_connection
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_critique_prompt
+from synesis_coder.revision_vocab import (
+    SCALAR_TAGS,
+    SYNR_FORMAT_VERSION,
+    canonical_tag,
+    resolve_sensitivity,
+)
 from synesis_coder.runtime_info import runtime_banner
 from synesis_coder.synr_io import (
     _END_ITEM,
@@ -109,10 +116,14 @@ def _extract_abstract_from_bib(bibref: str, bib_content: str) -> Optional[str]:
 
 
 def _get_source_text(item_block: str, bibref: str, ctx: dict) -> str:
-    """Obtém o texto-fonte para critique: abstract do .bib ou campo text do ITEM.
+    """Obtém o texto-fonte completo: abstract do .bib ou campo text do ITEM.
+
+    Usado pelo modo `refine` para RE-EXTRAÇÃO, onde o modelo precisa do texto
+    integral para reescrever a anotação. O modo `critique` usa
+    `_build_critique_source` — que delimita o trecho sob avaliação.
 
     Prioridade:
-    1. Abstract completo do arquivo .bib (melhor contexto para o crítico)
+    1. Abstract completo do arquivo .bib (melhor contexto para re-extração)
     2. Campo text do ITEM (fallback sempre disponível)
     """
     bib_content = ctx.get("bib_content") or ""
@@ -126,6 +137,129 @@ def _get_source_text(item_block: str, bibref: str, ctx: dict) -> str:
         return text_field
 
     return "(source text not available)"
+
+
+# Chars de abstract mantidos de cada lado do trecho, como contexto de orientação.
+CONTEXT_WINDOW_CHARS = 300
+
+
+def _normalize_for_match(s: str) -> str:
+    """Normaliza texto para busca tolerante a espaçamento, aspas e escapes LaTeX.
+
+    Deve espelhar exatamente a normalização feita em `_locate_excerpt` sobre o
+    abstract — se as duas divergirem, o casamento falha em silêncio.
+    """
+    s = s.replace("’", "'").replace("‘", "'")
+    s = s.replace("“", '"').replace("”", '"')
+    s = s.replace("—", "-").replace("–", "-")
+    s = s.replace("\\", "")  # escape LaTeX do .bib: BM\&FBOVESPA → BM&FBOVESPA
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _locate_excerpt(abstract: str, excerpt: str) -> Optional[tuple[int, int]]:
+    """Localiza o trecho no abstract, tolerando espaçamento e aspas tipográficas.
+
+    Returns:
+        (start, end) em índices do abstract ORIGINAL, ou None se não localizado.
+    """
+    if not abstract or not excerpt:
+        return None
+
+    # Mapa de índices: posição na string normalizada → posição na original.
+    norm_chars: list[str] = []
+    index_map: list[int] = []
+    prev_space = False
+    for i, ch in enumerate(abstract):
+        c = ch
+        if c in "’‘":
+            c = "'"
+        elif c in "“”":
+            c = '"'
+        elif c in "—–":
+            c = "-"
+        elif c == "\\":
+            # Escape LaTeX no .bib (`BM\&FBOVESPA`, `100\%`). O caractere
+            # seguinte é literal; a barra não existe no texto anotado.
+            continue
+        if c.isspace():
+            if prev_space or not norm_chars:
+                continue
+            norm_chars.append(" ")
+            index_map.append(i)
+            prev_space = True
+            continue
+        prev_space = False
+        norm_chars.append(c.lower())
+        index_map.append(i)
+
+    norm_abstract = "".join(norm_chars).strip()
+    # index_map desalinha se houve strip à esquerda; recalcular offset.
+    lead = len("".join(norm_chars)) - len("".join(norm_chars).lstrip())
+    norm_excerpt = _normalize_for_match(excerpt)
+    if not norm_excerpt:
+        return None
+
+    pos = norm_abstract.find(norm_excerpt)
+    if pos < 0:
+        return None
+
+    start_n = pos + lead
+    end_n = start_n + len(norm_excerpt) - 1
+    if start_n >= len(index_map) or end_n >= len(index_map):
+        return None
+    return index_map[start_n], index_map[end_n] + 1
+
+
+def _build_critique_source(
+    item_block: str, bibref: str, ctx: dict
+) -> tuple[str, bool]:
+    """Monta o bloco <source_context> para o critique, delimitando o trecho.
+
+    O campo `text` do ITEM é o ALVO da avaliação; o abstract entra apenas como
+    janela de contexto ao redor dele, para desambiguar referências. Antes desta
+    fase o crítico recebia o abstract inteiro e julgava cada ITEM contra o
+    artigo completo — causa medida de parte dos falsos positivos
+    (Estudo_Critique_Escopo_e_Taxonomia §4).
+
+    Returns:
+        (source_block, anchored) — `anchored` é False quando o trecho não pôde
+        ser localizado no abstract; nesse caso o comportamento anterior é
+        preservado (abstract inteiro) e o chamador é sinalizado.
+    """
+    excerpt = _extract_item_text(item_block)
+    bib_content = ctx.get("bib_content") or ""
+    abstract = (
+        _extract_abstract_from_bib(bibref, bib_content) if bib_content else None
+    )
+
+    if not excerpt:
+        # Sem trecho no ITEM não há alvo a delimitar.
+        return (abstract or "(source text not available)"), False
+
+    if not abstract:
+        # Sem abstract, o próprio trecho é a fonte — já é o escopo exato.
+        return f"<target>{excerpt}</target>", True
+
+    span = _locate_excerpt(abstract, excerpt)
+    if span is None:
+        # Ancoragem falhou: preserva o comportamento anterior, mas sinaliza.
+        return abstract, False
+
+    start, end = span
+    before = abstract[max(0, start - CONTEXT_WINDOW_CHARS) : start]
+    after = abstract[end : end + CONTEXT_WINDOW_CHARS]
+    target = abstract[start:end]
+
+    parts = []
+    if before:
+        prefix = "..." if start - CONTEXT_WINDOW_CHARS > 0 else ""
+        parts.append(f"{prefix}{before}")
+    parts.append(f"<target>{target}</target>")
+    if after:
+        suffix = "..." if end + CONTEXT_WINDOW_CHARS < len(abstract) else ""
+        parts.append(f"{after}{suffix}")
+
+    return "".join(parts), True
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +278,7 @@ _TEMPLATE_ARTIFACT_MARKERS = (
 )
 
 # Campos cujas duplicatas são rascunhos internos — só a última versão importa
-_SCALAR_FIELDS = frozenset({"suspicion_score", "reason", "reason_detail"})
+_SCALAR_FIELDS = SCALAR_TAGS
 
 
 def _parse_critique_response(raw: str) -> dict[str, str]:
@@ -154,7 +288,7 @@ def _parse_critique_response(raw: str) -> dict[str, str]:
     - `# $key: value` (formato preferido — com prefixo)
     - `key: value` (fallback para modelos que não seguem o formato exato)
 
-    Para campos escalares (suspicion_score, reason, reason_detail), múltiplas
+    Para campos escalares (divergence, reason, comment), múltiplas
     ocorrências são tratadas como rascunhos de raciocínio interno: apenas a
     ÚLTIMA versão é mantida (modelos de raciocínio como kimi-k2.6 revisam o
     score durante o thinking antes de finalizar). Para campos de conteúdo
@@ -169,7 +303,7 @@ def _parse_critique_response(raw: str) -> dict[str, str]:
 
     Returns:
         Dict {key: value} com todos os tags encontrados.
-        Sempre inclui 'suspicion_score' e 'reason' (com defaults se ausentes).
+        Sempre inclui 'divergence' e 'reason' (com defaults se ausentes).
     """
     tags: dict[str, str] = {}
     key_counts: dict[str, int] = {}
@@ -214,9 +348,24 @@ def _parse_critique_response(raw: str) -> dict[str, str]:
             if key.upper() not in ("ITEM", "END", "SOURCE", "ONTOLOGY"):
                 _add_tag(key, m2.group(2).strip())
 
+    # Traduzir nomes do formato 1 para o vocabulário atual (idempotente).
+    tags = {canonical_tag(k): v for k, v in tags.items()}
+
+    # Validar `reason` contra o enum. Antes, qualquer string passava — e a
+    # descalibração ficava silenciosa (Estudo §7.2.5).
+    if "reason" in tags:
+        normalized, was_valid = validate_reason(tags["reason"])
+        if not was_valid:
+            _log.warning(
+                "reason inválido descartado: %r — categorias válidas: %s",
+                tags["reason"],
+                ", ".join(sorted(VALID_REASONS)),
+            )
+        tags["reason"] = normalized
+
     # Garantir campos mínimos com defaults
-    if "suspicion_score" not in tags:
-        tags["suspicion_score"] = "0.0"
+    if "divergence" not in tags:
+        tags["divergence"] = "0.0"
     if "reason" not in tags:
         tags["reason"] = "none"
 
@@ -229,13 +378,13 @@ def _parse_critique_response(raw: str) -> dict[str, str]:
 
 
 def _score_of(tags: dict[str, str]) -> float:
-    """Extrai o suspicion_score (float) de um dict de tags de critique.
+    """Extrai a divergence (float) de um dict de tags de critique.
 
     Retorna 0.0 quando ausente ou não-numérico — mesma tolerância aplicada
     historicamente em _critique_single_item.
     """
     try:
-        return float(tags.get("suspicion_score", "0.0"))
+        return float(tags.get("divergence", "0.0"))
     except ValueError:
         return 0.0
 
@@ -246,6 +395,7 @@ async def _critique_tags(
     ctx: dict,
     llm_client: LLMClient,
     source_text: Optional[str] = None,
+    item_position: Optional[tuple[int, int]] = None,
 ) -> Optional[dict[str, str]]:
     """Avalia um bloco ITEM e retorna as tags de critique (sem filtro de threshold).
 
@@ -259,16 +409,29 @@ async def _critique_tags(
         bibref: Referência bibliográfica do ITEM (para logging).
         ctx: Contexto do projeto.
         llm_client: Cliente LLM de critique.
-        source_text: Texto-fonte já resolvido. Se None, é obtido via
-            _get_source_text (permite ao chamador reaproveitar o source entre
-            múltiplas chamadas de um mesmo ITEM, como no loop de refine).
+        source_text: Texto-fonte já resolvido. Se None, o critique monta a
+            janela delimitada via _build_critique_source. O modo `refine` passa
+            aqui o texto integral de _get_source_text, reaproveitando-o entre
+            as iterações do mesmo ITEM.
+        item_position: (n, total) do ITEM dentro do bibref, para informar ao
+            crítico que ele avalia um recorte entre vários — remove a cobrança
+            de cobertura global do abstract.
 
     Returns:
         Dict de tags de critique, ou None se a chamada LLM falhar.
     """
+    anchored = True
     if source_text is None:
-        source_text = _get_source_text(item_block, bibref, ctx)
-    messages = build_critique_prompt(ctx, item_block, source_text)
+        source_text, anchored = _build_critique_source(item_block, bibref, ctx)
+        if not anchored:
+            _log.info(
+                "ITEM @%s: trecho não localizado no abstract — critique recebe o "
+                "abstract inteiro (ancoragem falhou)",
+                bibref,
+            )
+    messages = build_critique_prompt(
+        ctx, item_block, source_text, item_position=item_position
+    )
 
     try:
         raw = await llm_client.call_async(messages, temperature=0.0, thinking=False)
@@ -283,7 +446,7 @@ async def _critique_tags(
     _log.info(
         "ITEM @%s → score=%.2f reason=%s%s",
         bibref, _score_of(tags), tags.get("reason", "?"),
-        f" detail={tags['reason_detail']!r}" if tags.get("reason_detail") else "",
+        f" comment={tags['comment']!r}" if tags.get("comment") else "",
     )
 
     return tags
@@ -296,6 +459,7 @@ async def _critique_single_item(
     llm_client: LLMClient,
     semaphore: asyncio.Semaphore,
     suspicion_threshold: float,
+    item_position: Optional[tuple[int, int]] = None,
 ) -> Optional[dict[str, str]]:
     """Revisa um bloco ITEM e retorna tags de revisão ou None.
 
@@ -306,12 +470,15 @@ async def _critique_single_item(
         llm_client: Cliente LLM compartilhado.
         semaphore: Semáforo de concorrência.
         suspicion_threshold: Score mínimo para incluir bloco # REVISION.
+        item_position: (n, total) do ITEM dentro do seu bibref.
 
     Returns:
         Dict de tags se suspicion_score >= threshold; None caso contrário.
     """
     async with semaphore:
-        tags = await _critique_tags(item_block, bibref, ctx, llm_client)
+        tags = await _critique_tags(
+            item_block, bibref, ctx, llm_client, item_position=item_position
+        )
         if tags is None:
             return None
 
@@ -461,6 +628,17 @@ async def _process_critique_async(
     # 5. Processar ITEMs de forma concorrente
     semaphore = asyncio.Semaphore(concurrent)
 
+    # Posição de cada ITEM dentro do seu bibref (n de N): informa ao crítico que
+    # ele avalia um recorte entre vários do mesmo abstract.
+    per_bibref_total: dict[str, int] = {}
+    for bibref, _ in items_with_bibrefs:
+        per_bibref_total[bibref] = per_bibref_total.get(bibref, 0) + 1
+    seen_count: dict[str, int] = {}
+    positions: list[tuple[int, int]] = []
+    for bibref, _ in items_with_bibrefs:
+        seen_count[bibref] = seen_count.get(bibref, 0) + 1
+        positions.append((seen_count[bibref], per_bibref_total[bibref]))
+
     tasks = [
         _critique_single_item(
             item_block=item_block,
@@ -469,8 +647,9 @@ async def _process_critique_async(
             llm_client=llm_client,
             semaphore=semaphore,
             suspicion_threshold=suspicion_threshold,
+            item_position=position,
         )
-        for bibref, item_block in items_with_bibrefs
+        for (bibref, item_block), position in zip(items_with_bibrefs, positions)
     ]
 
     # gather preserva ordem: revision_results[i] corresponde a items_with_bibrefs[i]
@@ -487,19 +666,20 @@ async def _process_critique_async(
     import datetime
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     suspicion_rate = items_flagged / total_items if total_items > 0 else 0.0
+    _, sensitivity_label = resolve_sensitivity(suspicion_threshold)
     header = {
-        "phase": "critique",
+        "phase": "review",
+        "format": str(SYNR_FORMAT_VERSION),
         "model": llm_client.model,
         "timestamp": timestamp,
-        "threshold": str(suspicion_threshold),
+        "sensitivity": sensitivity_label,
         "metrics.items_total": str(total_items),
-        "metrics.items_flagged": str(items_flagged),
-        "metrics.suspicion_rate": f"{suspicion_rate:.3f}",
-        "metrics.suspicion_rate.formula": "items_flagged / items_total",
-        "metrics.suspicion_rate.description": (
-            "proporcao de ITEMs com score >= threshold; "
-            "< 0.30 indica anotacoes de boa qualidade"
-        ),
+        "metrics.items_to_review": str(items_flagged),
+        # Concordância (não "taxa de suspeição"): mede na direção em que o
+        # pesquisador pensa — quer maximizar — e usa a mesma escala já adotada
+        # para comparação com padrão ouro nos demais estudos do ecossistema.
+        # Dispensa a nota explicativa que `suspicion_rate` exigia.
+        "metrics.agreement": f"{1.0 - suspicion_rate:.3f}",
     }
 
     synr_doc = create_synr(
@@ -519,15 +699,22 @@ async def _process_critique_async(
 
     elapsed = time.monotonic() - start_time
 
+    agreement = 1.0 - suspicion_rate
     summary = (
         f"Critique concluído em {elapsed:.1f}s\n"
         f"  Origem:    {syn_path.name}\n"
         f"  Saída:     {output_path}\n"
         f"  ITEMs:     {total_items} total | {items_flagged} com revisão\n"
+        f"  Concordância: {agreement:.3f}\n"
         f"  Modelo:    {llm_client.model}\n"
         f"  Limiar:    {suspicion_threshold}\n"
         f"  {llm_client.usage.summary_line()}"
     )
+
+    warning = _calibration_warning(agreement, total_items)
+    if warning:
+        summary += "\n\n" + warning
+        _log.warning(warning.replace("\n", " "))
 
     if format == "verbose":
         header_str = (
@@ -541,6 +728,40 @@ async def _process_critique_async(
         return header_str + "\n" + summary
 
     return summary
+
+
+# Concordância abaixo deste valor sugere crítico descalibrado, não corpus ruim.
+# Espelha o patamar já documentado no cabeçalho do .synr (suspicion_rate < 0.30
+# indica anotações de boa qualidade → concordância > 0.70).
+AGREEMENT_WARNING_THRESHOLD = 0.70
+
+# Abaixo deste nº de ITEMs a taxa é instável demais para sustentar o aviso.
+_MIN_ITEMS_FOR_WARNING = 10
+
+
+def _calibration_warning(agreement: float, total_items: int) -> Optional[str]:
+    """Devolve aviso de descalibração quando a concordância é baixa demais.
+
+    Uma taxa alta de sinalização quase nunca significa 'o corpus tem tantos
+    defeitos': significa que o crítico está aplicando critério mais rígido que o
+    template declara, ou que o limiar está baixo. Converter isso em aviso torna
+    a descalibração observável em vez de silenciosa (Estudo §7.4).
+    """
+    if total_items < _MIN_ITEMS_FOR_WARNING:
+        return None
+    if agreement >= AGREEMENT_WARNING_THRESHOLD:
+        return None
+
+    return (
+        f"AVISO: concordância de {agreement:.3f} está abaixo de "
+        f"{AGREEMENT_WARNING_THRESHOLD:.2f}.\n"
+        "  Isso sugere revisor descalibrado ou limiar baixo demais — não "
+        "necessariamente\n"
+        "  anotações ruins. Antes de incorporar, verifique por amostragem se as "
+        "revisões\n"
+        "  apontam violações reais da régua do template ou apenas leituras "
+        "alternativas."
+    )
 
 
 def _resolve_project(syn_path: Path, project_path: Optional[Path]) -> Optional[Path]:

@@ -18,6 +18,10 @@ from synesis_coder.modes.critique_mode import (
     DEFAULT_SUSPICION_THRESHOLD,
     _extract_abstract_from_bib,
     _extract_item_text,
+    AGREEMENT_WARNING_THRESHOLD,
+    CONTEXT_WINDOW_CHARS,
+    _build_critique_source,
+    _calibration_warning,
     _get_source_text,
     _parse_critique_response,
     process_critique,
@@ -158,49 +162,178 @@ class TestGetSourceText:
 
 
 # ---------------------------------------------------------------------------
+# _build_critique_source — Fase 2 (escopo do trecho)
+# ---------------------------------------------------------------------------
+
+
+_ABSTRACT_LONG = (
+    "A" * 500
+    + " Community trust enables social acceptance of wind energy projects. "
+    + "B" * 500
+)
+_BIB_LONG = f"@article{{long2024,\n  title = {{T}},\n  abstract = {{{_ABSTRACT_LONG}}}\n}}\n"
+
+
+class TestBuildCritiqueSource:
+    def test_wraps_excerpt_in_target(self):
+        block = (
+            "ITEM @long2024\n"
+            "    text: Community trust enables social acceptance of wind energy projects.\n"
+            "END ITEM\n"
+        )
+        source, anchored = _build_critique_source(block, "long2024", {"bib_content": _BIB_LONG})
+        assert anchored is True
+        assert "<target>" in source and "</target>" in source
+        assert "Community trust enables social acceptance" in source
+
+    def test_window_truncates_abstract(self):
+        block = (
+            "ITEM @long2024\n"
+            "    text: Community trust enables social acceptance of wind energy projects.\n"
+            "END ITEM\n"
+        )
+        source, _ = _build_critique_source(block, "long2024", {"bib_content": _BIB_LONG})
+        # 1000 chars de preenchimento reduzidos a ~300 de cada lado
+        assert len(source) < len(_ABSTRACT_LONG)
+        assert source.count("A") <= CONTEXT_WINDOW_CHARS + 5
+        assert source.count("B") <= CONTEXT_WINDOW_CHARS + 5
+
+    def test_unanchored_falls_back_to_full_abstract(self):
+        block = "ITEM @long2024\n    text: totally absent sentence.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "long2024", {"bib_content": _BIB_LONG})
+        assert anchored is False
+        assert "<target>" not in source
+        assert source == _ABSTRACT_LONG
+
+    def test_no_abstract_uses_excerpt_as_target(self):
+        block = "ITEM @ref\n    text: Only this sentence.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "ref", {"bib_content": None})
+        assert anchored is True
+        assert source == "<target>Only this sentence.</target>"
+
+    def test_no_excerpt_returns_abstract_unanchored(self):
+        block = "ITEM @long2024\n    note: no text field\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "long2024", {"bib_content": _BIB_LONG})
+        assert anchored is False
+        assert "<target>" not in source
+
+    def test_matches_despite_typographic_apostrophe(self):
+        abstract = "The study of Si’s role in the network is central."
+        bib = f"@article{{typo2024,\n  abstract = {{{abstract}}}\n}}\n"
+        block = "ITEM @typo2024\n    text: The study of Si's role in the network is central.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "typo2024", {"bib_content": bib})
+        assert anchored is True
+        assert "<target>" in source
+
+    def test_matches_despite_whitespace_differences(self):
+        abstract = "Trust   enables\n  acceptance of the technology."
+        bib = f"@article{{ws2024,\n  abstract = {{{abstract}}}\n}}\n"
+        block = "ITEM @ws2024\n    text: Trust enables acceptance of the technology.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "ws2024", {"bib_content": bib})
+        assert anchored is True
+        assert "<target>" in source
+
+    def test_excerpt_at_start_no_underflow(self):
+        abstract = "Opening sentence here. " + "C" * 400
+        bib = f"@article{{start2024,\n  abstract = {{{abstract}}}\n}}\n"
+        block = "ITEM @start2024\n    text: Opening sentence here.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "start2024", {"bib_content": bib})
+        assert anchored is True
+        assert source.startswith("<target>Opening sentence here.</target>")
+
+    def test_excerpt_at_end_no_overflow(self):
+        abstract = "D" * 400 + " Closing sentence here."
+        bib = f"@article{{end2024,\n  abstract = {{{abstract}}}\n}}\n"
+        block = "ITEM @end2024\n    text: Closing sentence here.\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "end2024", {"bib_content": bib})
+        assert anchored is True
+        assert source.endswith("<target>Closing sentence here.</target>")
+
+    def test_target_preserves_original_casing(self):
+        abstract = "The Wind Energy Sector expanded rapidly last year."
+        bib = f"@article{{case2024,\n  abstract = {{{abstract}}}\n}}\n"
+        block = "ITEM @case2024\n    text: the wind energy sector expanded rapidly\nEND ITEM\n"
+        source, anchored = _build_critique_source(block, "case2024", {"bib_content": bib})
+        assert anchored is True
+        assert "<target>The Wind Energy Sector expanded rapidly</target>" in source
+
+
+# ---------------------------------------------------------------------------
+# _calibration_warning — Fase 3 (calibração anti-falso-positivo)
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrationWarning:
+    def test_warns_below_threshold(self):
+        # face85 real: 75/108 sinalizados → concordância 0.306
+        w = _calibration_warning(0.306, 108)
+        assert w is not None
+        assert "0.306" in w
+        assert "descalibrado" in w
+
+    def test_silent_above_threshold(self):
+        assert _calibration_warning(0.85, 108) is None
+
+    def test_silent_exactly_at_threshold(self):
+        assert _calibration_warning(AGREEMENT_WARNING_THRESHOLD, 108) is None
+
+    def test_warns_just_below_threshold(self):
+        assert _calibration_warning(AGREEMENT_WARNING_THRESHOLD - 0.01, 108) is not None
+
+    def test_silent_on_small_sample(self):
+        """Poucos ITEMs → taxa instável, não sustenta o aviso."""
+        assert _calibration_warning(0.0, 5) is None
+
+    def test_warns_on_boundary_sample_size(self):
+        assert _calibration_warning(0.1, 10) is not None
+
+
+# ---------------------------------------------------------------------------
 # _parse_critique_response
 # ---------------------------------------------------------------------------
 
 
 class TestParseCritiqueResponse:
     def test_parses_hash_dollar_format(self):
-        raw = "# $suspicion_score: 0.84\n# $reason: wrong_direction\n# $chain: A -> B -> C"
+        raw = "# $divergence: 0.84\n# $reason: inverted\n# $chain: A -> B -> C"
         tags = _parse_critique_response(raw)
-        assert tags["suspicion_score"] == "0.84"
-        assert tags["reason"] == "wrong_direction"
+        assert tags["divergence"] == "0.84"
+        assert tags["reason"] == "inverted"
         assert tags["chain"] == "A -> B -> C"
 
     def test_parses_plain_format_fallback(self):
         raw = "suspicion_score: 0.72\nreason: missing_evidence\nnote: rephrase needed"
         tags = _parse_critique_response(raw)
-        assert tags["suspicion_score"] == "0.72"
-        assert tags["reason"] == "missing_evidence"
+        assert tags["divergence"] == "0.72"
+        # `missing_evidence` nunca foi categoria válida: antes passava em
+        # silêncio; agora é rejeitada e normalizada (Estudo §7.2.5).
+        assert tags["reason"] == "none"
 
     def test_defaults_when_no_output(self):
         tags = _parse_critique_response("")
-        assert tags["suspicion_score"] == "0.0"
+        assert tags["divergence"] == "0.0"
         assert tags["reason"] == "none"
 
     def test_defaults_when_only_partial_output(self):
-        raw = "# $suspicion_score: 0.5"
+        raw = "# $divergence: 0.5"
         tags = _parse_critique_response(raw)
-        assert tags["suspicion_score"] == "0.5"
+        assert tags["divergence"] == "0.5"
         assert tags["reason"] == "none"  # default injected
 
     def test_ignores_synesis_block_keywords(self):
         """Não deve capturar linhas ITEM/END como tags."""
-        raw = "ITEM @ref\n# $suspicion_score: 0.1\n# $reason: none\nEND ITEM"
+        raw = "ITEM @ref\n# $divergence: 0.1\n# $reason: none\nEND ITEM"
         tags = _parse_critique_response(raw)
         assert "ITEM" not in tags
         assert "END" not in tags
-        assert tags["suspicion_score"] == "0.1"
+        assert tags["divergence"] == "0.1"
 
     def test_parses_mixed_formats(self):
         """Aceita # $ e plain na mesma resposta (prioriza # $)."""
-        raw = "# $suspicion_score: 0.6\nreason: off_topic"
+        raw = "# $divergence: 0.6\nreason: off_topic"
         tags = _parse_critique_response(raw)
-        assert tags["suspicion_score"] == "0.6"
-        assert tags["reason"] == "off_topic"
+        assert tags["divergence"] == "0.6"
+        assert tags["reason"] == "none"  # fora do enum → rejeitado
 
     def test_preserves_arrow_values(self):
         raw = "# $chain: Trust -> INFLUENCES -> Social_Acceptance"
@@ -240,7 +373,7 @@ class TestBuildCritiquePrompt:
         # Deve conter pelo menos um dos nomes de campo
         assert any(f in system_content for f in ("chain", "note", "text"))
         # Deve conter instruções de output format
-        assert "suspicion_score" in system_content
+        assert "divergence" in system_content
 
     def test_user_message_contains_item_and_source(self):
         if not PROJECT_SOCIAL.exists():
@@ -291,8 +424,8 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "test.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        high_score_response = "# $suspicion_score: 0.85\n# $reason: wrong_direction\n# $chain: Trust -> INFLUENCES -> Social_Acceptance"
-        low_score_response = "# $suspicion_score: 0.05\n# $reason: none"
+        high_score_response = "# $divergence: 0.85\n# $reason: inverted\n# $chain: Trust -> INFLUENCES -> Social_Acceptance"
+        low_score_response = "# $divergence: 0.05\n# $reason: none"
 
         call_count = 0
         async def mock_call_async(*args, **kwargs):
@@ -316,7 +449,7 @@ class TestProcessCritiqueWithMockLLM:
         content = synr_file.read_text(encoding="utf-8")
         # Primeiro ITEM (score 0.85) deve ter REVISION
         assert "# REVISION" in content
-        assert "# $suspicion_score: 0.85" in content
+        assert "# $divergence: 0.85" in content
 
     def test_low_score_no_revision_block(self, tmp_path):
         """Score < threshold não gera bloco # REVISION."""
@@ -326,7 +459,7 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "test.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        low_score = "# $suspicion_score: 0.05\n# $reason: none"
+        low_score = "# $divergence: 0.05\n# $reason: none"
         mock_client = self._make_mock_client(low_score)
         mock_client.call_async = AsyncMock(return_value=low_score)
 
@@ -351,8 +484,8 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "test.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        mock_client = self._make_mock_client("# $suspicion_score: 0.0\n# $reason: none")
-        mock_client.call_async = AsyncMock(return_value="# $suspicion_score: 0.0\n# $reason: none")
+        mock_client = self._make_mock_client("# $divergence: 0.0\n# $reason: none")
+        mock_client.call_async = AsyncMock(return_value="# $divergence: 0.0\n# $reason: none")
 
         with patch("synesis_coder.modes.critique_mode.LLMClient", return_value=mock_client):
             process_critique(
@@ -362,7 +495,7 @@ class TestProcessCritiqueWithMockLLM:
             )
 
         content = (tmp_path / "test.synr").read_text(encoding="utf-8")
-        assert "# $phase: critique" in content
+        assert "# $phase: review" in content
         assert "# $model:" in content
         assert "# $timestamp:" in content
 
@@ -374,8 +507,8 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "review.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        mock_client = self._make_mock_client("# $suspicion_score: 0.0\n# $reason: none")
-        mock_client.call_async = AsyncMock(return_value="# $suspicion_score: 0.0\n# $reason: none")
+        mock_client = self._make_mock_client("# $divergence: 0.0\n# $reason: none")
+        mock_client.call_async = AsyncMock(return_value="# $divergence: 0.0\n# $reason: none")
 
         with patch("synesis_coder.modes.critique_mode.LLMClient", return_value=mock_client):
             process_critique(
@@ -394,8 +527,8 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "test.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        mock_client = self._make_mock_client("# $suspicion_score: 0.0\n# $reason: none")
-        mock_client.call_async = AsyncMock(return_value="# $suspicion_score: 0.0\n# $reason: none")
+        mock_client = self._make_mock_client("# $divergence: 0.0\n# $reason: none")
+        mock_client.call_async = AsyncMock(return_value="# $divergence: 0.0\n# $reason: none")
 
         custom_out = tmp_path / "subdir" / "output.synr"
 
@@ -417,8 +550,8 @@ class TestProcessCritiqueWithMockLLM:
         syn_file = tmp_path / "test.syn"
         syn_file.write_text(_SYN_TWO_ITEMS, encoding="utf-8")
 
-        mock_client = self._make_mock_client("# $suspicion_score: 0.0\n# $reason: none")
-        mock_client.call_async = AsyncMock(return_value="# $suspicion_score: 0.0\n# $reason: none")
+        mock_client = self._make_mock_client("# $divergence: 0.0\n# $reason: none")
+        mock_client.call_async = AsyncMock(return_value="# $divergence: 0.0\n# $reason: none")
 
         with patch("synesis_coder.modes.critique_mode.LLMClient", return_value=mock_client):
             result = process_critique(
@@ -478,7 +611,7 @@ class TestCritiqueOutputCompiles:
         items = _eib(syn_content)
         n_items = len(items)
 
-        revisions = [{"suspicion_score": "0.85", "reason": "wrong_direction"}] + \
+        revisions = [{"suspicion_score": "0.85", "reason": "inverted"}] + \
                     [None] * max(0, n_items - 1)
 
         header = {"phase": "critique", "model": "test-model", "timestamp": "T"}

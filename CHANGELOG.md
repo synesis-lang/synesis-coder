@@ -7,6 +7,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.9.0] — 2026-08-18
+
+Robustez para campanhas longas (milhares de registros) e revisão calibrada.
+
+Motivada por duas frentes de estudo com medição sobre corpus real: a lacuna de
+escopo e calibração do modo `critique`, e a integridade da saída do modo
+`abstract` em processamento de larga escala.
+
+### Fixed — perda de dados no modo `abstract` (crítico)
+
+- **Um único timeout abortava a campanha inteira.** No caminho de exceção do
+  LLM, o `.syn` gravado continha **apenas comentários** — e um `.syn` só de
+  comentários não é parseável. Como cada batch recarrega o projeto com glob de
+  `annotations/*.syn`, o batch seguinte levantava `SynesisSyntaxError` e a
+  execução morria. O bloco de falha agora traz um `SOURCE` sintaticamente
+  válido, com sentinelas compatíveis com o TIPO de cada campo obrigatório
+  (texto livre em `ENUMERATED` produziria `InvalidEnumeratedValue`).
+  `tolerate_annotation_errors` não cobria o caso: a exceção é de *parse*,
+  anterior à tolerância.
+- **A recarga de projeto entre batches virou tolerante a falha**, seguindo com
+  o contexto anterior. Um `.syn` malformado no diretório de saída — de edição
+  manual ou de outra ferramenta — não derruba mais horas de trabalho.
+- **O modo arquivo único truncava a saída a cada batch.** `annotations.syn` era
+  reescrito com os registros *do batch corrente*: numa campanha de 2.800
+  referências com `--batch-size 25` restariam **25 anotações**, e o resumo
+  reportaria "2.800 OK". Os blocos passam a acumular entre batches.
+- **Escrita agora é atômica** (`safe_write_output`, tmp + `os.replace`) em todos
+  os modos. Antes, `Path.write_text` podia deixar arquivo truncado numa
+  interrupção. Medido: reescrever o arquivo inteiro a cada batch custa o mesmo
+  que append (0,17 s em 112 batches), com garantia mais forte.
+- **Ordem de saída determinística.** As tarefas concluíam fora de ordem
+  (`as_completed`), então os blocos apareciam embaralhados e o arquivo variava
+  entre execuções. A gravação passa a seguir a ordem do `.bib`.
+- **Metadados do `.synr` deixaram de virar valor de campo.** `_META_TAGS` não
+  incluía `model`, `timestamp` nem `threshold`: um template com campo homônimo
+  receberia o cabeçalho da revisão como correção.
+
+### Fixed — perda silenciosa de dados no `incorporate`
+
+- **Correções de `chain` colidiam e destruíam anotações.** Quando várias chains
+  compartilham o nó-fonte — padrão comum de `APPLIES` —, o casamento por raiz
+  não as distingue: a correção era aplicada à **primeira** ocorrência,
+  apagando um valor que ela não endereçava enquanto o alvo real sobrevivia,
+  e o relatório informava `changed=2` para uma linha alterada. Agora linhas
+  consumidas são marcadas, e casamento ambíguo é **rejeitado** em vez de
+  adivinhado. Sobre o corpus face85: 25 correções perigosas rejeitadas (15%),
+  nenhuma chain perdida.
+- **Correções byte-idênticas** para o mesmo campo são descartadas (rascunho do
+  modelo, não duas correções legítimas).
+- **Primitiva de remoção**: `# $chain: none` / `(none)` remove a ocorrência em
+  vez de gravar a string literal `none` como valor.
+
+### Added — campanhas longas (`abstract`)
+
+- **`--resume`** — pula referências já anotadas com sucesso. O estado vem dos
+  próprios `.syn`, não de um manifesto: um arquivo de progresso seria uma
+  segunda fonte de verdade capaz de divergir do disco. Exige `SOURCE` **e**
+  ao menos um `ITEM` **e** ausência da marca de falha — sem a terceira
+  condição, um registro que falhou por zero ITEMs seria confundido com
+  trabalho pronto.
+- **`--split-every N`** — grava N referências por arquivo
+  (`annotations_0001.syn`, …). O índice deriva da **posição global** do
+  registro, o que mantém o mapeamento estável sob `--resume`. Corte apenas em
+  fronteira de registro. Mutuamente exclusivo com `--per-reference`, validado
+  antes de qualquer chamada de API.
+- **`--overwrite` / `--backup`** — o comando não os tinha, ao contrário de
+  `ontology`, `document` e `incorporate`. Verificados **uma vez**, antes de
+  gastar API.
+- **`--cooldown`** (`auto` | segundos | `0`).
+
+### Changed — pausa entre batches proporcional ao trabalho
+
+A fórmula usava o tempo **acumulado desde o início da execução**, saturando o
+teto de 30 s por volta do 5º batch e permanecendo lá. Numa campanha de 112
+batches isso custava ~55 min de `sleep`, sem relação com pressão de rate limit
+— que depende da taxa recente de requisições, não de há quanto tempo o processo
+roda. A pausa passa a ser proporcional à duração do **batch corrente**:
+**~43 min economizados** em 2.800 registros.
+
+### Added — `anchor`, verificação sem LLM
+
+Novo comando que confere se o trecho de cada ITEM ocorre de fato na fonte.
+Determinístico e gratuito. Complementa o compilador, que já valida enums,
+faixas, `REQUIRED`, `BUNDLE` e relações de chain, mas não a ancoragem do
+trecho — a única classe da proposta original que ele não cobria.
+
+Ancoragem **factual**, não literalidade byte-a-byte: normaliza aspas
+tipográficas, espaçamento, travessões, caixa e escapes LaTeX (`BM\&FBOVESPA`).
+Sobre o face85 encontrou 4 defeitos reais em 108 ITEMs — três originados de
+sujeira de PDF que o extrator limpou em silêncio.
+
+### Changed — modo `critique` reescrito
+
+- **Escopo do trecho.** O crítico recebia o abstract **inteiro** como fonte,
+  nunca o recorte que o ITEM anota — logo julgava cada ITEM contra o artigo
+  completo. O campo `text` passa a ser o `<target>`, com o abstract como janela
+  de ±300 caracteres ao redor. Medido: **−45,8% de tokens** e 92,6% de
+  ancoragem. Acompanha o índice `ITEM n de N` por bibref.
+- **Regra de deferência.** Sem contrapeso, o modelo era recompensado por
+  encontrar problemas: 78 revisões em 108 ITEMs. A régua instrui a atribuir
+  `none` quando o template **admite** a anotação sob leitura razoável, e a não
+  exigir precisão que as guidelines não pedem. Efeito isolado medido:
+  concordância **0,306 → 0,463**, 5,6× o ganho do escopo.
+- **Taxonomia universal de `reason`.** As cinco categorias anteriores chegavam
+  ao modelo como nomes crus, sem definição, e duas concentravam 73% das
+  ocorrências; `anchor_missing` cobria seis defeitos não relacionados. Sete
+  categorias novas — `unsupported`, `overstated`, `inverted`, `granularity`,
+  `infidelity`, `incomplete`, `none` — definidas pela **relação** entre
+  anotação e fonte, sem citar nome de campo. A aplicabilidade é **derivada do
+  template**: num template sem `CHAIN`, `inverted` e `granularity` não são
+  emitidas. Validado em três templates estruturalmente distintos.
+- **`reason` é validado contra o enum.** Antes qualquer string passava com
+  default silencioso.
+- **Aviso de calibração** quando a concordância fica abaixo de 0,70 — sinal de
+  revisor descalibrado ou limiar baixo, não necessariamente de anotação ruim.
+
+### Changed — vocabulário do `.synr` (formato 2)
+
+O cabeçalho falava a língua da auditoria (`suspicion`, `flagged`, `threshold`),
+inadequada a pesquisa qualitativa, cuja prática de referência é revisão por
+pares. Precisava anexar `.formula` e `.description` a cada métrica para ser
+legível — sintoma de que o nome não comunicava.
+
+| formato 1 | formato 2 |
+|---|---|
+| `phase: critique` | `phase: review` |
+| `suspicion_score` | `divergence` |
+| `reason_detail` | `comment` |
+| `threshold: 0.2` | `sensitivity: standard` |
+| `metrics.items_flagged` | `metrics.items_to_review` |
+| `metrics.suspicion_rate: 0.722` | `metrics.agreement: 0.278` |
+
+A inversão para `agreement` alinha a métrica à direção em que o pesquisador
+pensa — quer maximizar — e usa a mesma escala já adotada nos estudos para
+comparação com padrão ouro, dispensando a nota explicativa.
+
+`--sensitivity lenient|standard|strict` substitui o número mágico;
+`--threshold` segue aceito como forma legada. **`.synr` do formato 1 continuam
+legíveis** por `refine` e `incorporate`.
+
+### Changed — ajuda da CLI
+
+Reorganizada segundo o modelo do compilador: copyright, URL e licença no
+cabeçalho, e comandos agrupados por **finalidade do pesquisador** (anotar um
+corpus, construir a ontologia, revisar anotações, verificar sem LLM, dados de
+treino) em vez de por estágio interno do pipeline.
+
+### Internal
+
+- `revision_vocab.py` e `critique_taxonomy.py` como fontes únicas. `_META_TAGS`
+  e `_CRITIQUE_META_TAGS` eram duas listas literais duplicadas dos mesmos
+  nomes, sem nada que as mantivesse sincronizadas — renomear com a duplicação
+  de pé teria reintroduzido o defeito.
+- `_build_critique_source` separada de `_get_source_text`: o `refine` consome a
+  segunda para **re-extração** e precisa do texto integral; marcadores
+  `<target>` vazariam para um prompt onde não fazem sentido.
+- Suíte: 695 testes (era 557).
+
+---
+
 ## [0.8.0] — 2026-08-11
 
 Primeira publicação no PyPI.
