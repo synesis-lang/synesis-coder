@@ -495,3 +495,76 @@ class TestOntologyModeIntegration:
                 concurrent=1,
                 format="plain",
             )
+
+
+class TestStaleOntologyDoesNotBlockRegeneration:
+    """Regerar a ontologia nao pode exigir que a ontologia antiga compile.
+
+    Um `.syno` escrito sob regras anteriores (ex.: ORDERED com rotulo, hoje
+    E088) abortava a carga do projeto — impedindo justamente a regeneracao que o
+    corrigiria. Fora de `--update` o arquivo e integralmente substituido, entao
+    carrega-lo e desnecessario.
+    """
+
+    def _run(self, update: bool, tmp_path, load_side_effect=None):
+        import asyncio
+
+        from synesis_coder.modes import ontology_mode
+
+        ctx = _make_ctx(code_index_codes=["a"], ontology_index={})
+        captured: dict = {}
+
+        def fake_load(project_path, **kwargs):
+            captured.update(kwargs)
+            if load_side_effect is not None:
+                raise load_side_effect
+            return ctx
+
+        async def fake_process_one(code, _ctx, _client, _sem):
+            return (code, f"ONTOLOGY {code}\nEND ONTOLOGY", True)
+
+        with patch.object(ontology_mode, "load_project", fake_load), \
+             patch.object(ontology_mode, "LLMClient", MagicMock()), \
+             patch.object(ontology_mode, "runtime_banner", MagicMock()), \
+             patch.object(ontology_mode, "_process_one_code", fake_process_one):
+            result = asyncio.run(
+                ontology_mode._process_ontology_async(
+                    project_path=Path("dummy.synp"),
+                    output_path=tmp_path / "out.syno",
+                    update=update,
+                    concurrent=1,
+                    model=None,
+                    format="plain",
+                    overwrite=True,
+                    backup=False,
+                )
+            )
+        return captured, result
+
+    def test_full_regeneration_does_not_load_the_old_ontology(self, tmp_path):
+        captured, _ = self._run(update=False, tmp_path=tmp_path)
+        assert captured["load_ontology"] is False
+
+    def test_update_still_loads_the_old_ontology(self, tmp_path):
+        """Em --update o arquivo e preservado e anexado: precisa ser valido."""
+        captured, _ = self._run(update=True, tmp_path=tmp_path)
+        assert captured["load_ontology"] is True
+
+    def test_stale_annotations_are_tolerated(self, tmp_path):
+        captured, _ = self._run(update=False, tmp_path=tmp_path)
+        assert captured["tolerate_annotation_errors"] is True
+
+    def test_update_failure_explains_how_to_proceed(self, tmp_path):
+        err = ValueError("=== ERROS ===\n[!] `aspect: Economico` — em ORDERED grave o indice")
+        with pytest.raises(ValueError) as excinfo:
+            self._run(update=True, tmp_path=tmp_path, load_side_effect=err)
+        msg = str(excinfo.value)
+        assert "SEM `--update`" in msg
+        assert "aspect: Economico" in msg  # preserva o diagnostico original
+
+    def test_full_regeneration_failure_is_not_rewritten(self, tmp_path):
+        """Sem --update, um erro de carga e um erro real: nao mascarar."""
+        err = ValueError("template invalido")
+        with pytest.raises(ValueError) as excinfo:
+            self._run(update=False, tmp_path=tmp_path, load_side_effect=err)
+        assert "--update" not in str(excinfo.value)

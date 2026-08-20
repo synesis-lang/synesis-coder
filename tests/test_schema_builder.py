@@ -53,14 +53,44 @@ class TestFieldToSchema:
         )
         assert field_to_schema(spec) == {"enum": ["LOW", "MEDIUM", "HIGH"]}
 
-    def test_ordered_becomes_enum(self):
+    def test_ordered_becomes_bounded_integer(self):
+        """Em ORDERED o dado é o ÍNDICE — oferecer rótulos geraria E088.
+
+        Índices contíguos viram `minimum`/`maximum`: o Gemini recusa qualquer
+        `enum` numérico (ver `_ordered_schema`), e a faixa expressa a mesma
+        restrição sendo universalmente aceita.
+        """
         spec = FieldSpec(
             name="dimension",
             type=FieldType.ORDERED,
             scope=Scope.ONTOLOGY,
             values=[_ov(0, "Undefined"), _ov(1, "Community_Acceptance")],
         )
-        assert field_to_schema(spec) == {"enum": ["Undefined", "Community_Acceptance"]}
+        assert field_to_schema(spec) == {"type": "integer", "minimum": 0, "maximum": 1}
+
+    def test_ordered_with_gap_falls_back_to_enum(self):
+        """Com lacuna, a faixa admitiria um índice inexistente — enum é obrigatório."""
+        spec = FieldSpec(
+            name="grupo",
+            type=FieldType.ORDERED,
+            scope=Scope.ONTOLOGY,
+            values=[_ov(0, "A"), _ov(1, "B"), _ov(3, "D")],
+        )
+        assert field_to_schema(spec) == {"enum": [0, 1, 3]}
+
+    def test_enumerated_still_uses_labels(self):
+        """ENUMERATED não tem ordem nem índice: o dado é o próprio rótulo."""
+        spec = FieldSpec(
+            name="zone",
+            type=FieldType.ENUMERATED,
+            scope=Scope.ITEM,
+            values=[_ov(-1, "Aim"), _ov(-1, "Gap")],
+        )
+        assert field_to_schema(spec) == {"enum": ["Aim", "Gap"]}
+
+    def test_ordered_without_values_degrades_to_integer(self):
+        spec = FieldSpec(name="d", type=FieldType.ORDERED, scope=Scope.ONTOLOGY)
+        assert field_to_schema(spec) == {"type": "integer"}
 
     def test_enum_without_values_degrades_to_string(self):
         spec = FieldSpec(name="e", type=FieldType.ENUMERATED, scope=Scope.ITEM)

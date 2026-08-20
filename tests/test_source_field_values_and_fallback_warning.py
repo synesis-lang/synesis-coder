@@ -123,10 +123,16 @@ class TestSourceFieldValuesInPrompt:
         assert "Estudos contábeis" in section
 
     def test_ordered_source_field_lists_indexed_values(self):
+        """O índice tem saliência; o rótulo entra como glosa entre parênteses.
+
+        A forma antiga (`0: Low`) sugeria os dois lados com o mesmo peso e
+        produzia anotações com o rótulo — hoje erro E088 no compilador.
+        """
         section = _build_source_fields_section(_ctx())
 
-        assert "0: Low" in section
-        assert "1: High" in section
+        assert "0  (Low)" in section
+        assert "1  (High)" in section
+        assert "write the NUMBER, never the label" in section
 
     def test_scale_source_field_shows_range(self):
         section = _build_source_fields_section(_ctx())

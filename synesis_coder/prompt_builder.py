@@ -81,8 +81,8 @@ def _build_system_prompt(ctx: dict) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions) "
-            f"must be written in {lang}.\n"
+            f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions, "
+            f"TOPIC categories) must be written in {lang}.\n"
             "Exceptions: QUOTATION blocks preserve the original language of the source "
             "text. Concept names in CHAIN fields remain in the language used in "
             "EXISTING PROJECT CONCEPTS below."
@@ -211,7 +211,8 @@ def _build_values_system_prompt(ctx: dict, scope: str) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT) must be written in {lang}. "
+            f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT, TOPIC) must be "
+            f"written in {lang}. "
             "QUOTATION values preserve the source language. Chain concepts stay in the "
             "language of EXISTING PROJECT CONCEPTS below."
         )
@@ -344,7 +345,15 @@ def _field_instruction(
     elif spec.type == FieldType.TOPIC:
         pass  # topic_index é injetado separadamente
 
-    elif spec.type in (FieldType.ORDERED, FieldType.ENUMERATED):
+    elif spec.type == FieldType.ORDERED:
+        if spec.values:
+            val_lines = _format_values(spec)
+            extras.append(
+                "    Allowed values — write the NUMBER, never the label:\n"
+                + "\n".join(val_lines)
+            )
+
+    elif spec.type == FieldType.ENUMERATED:
         if spec.values:
             val_lines = _format_values(spec)
             extras.append("    Allowed values:\n" + "\n".join(val_lines))
@@ -373,18 +382,27 @@ def _generic_instruction(field_type: FieldType) -> str:
         FieldType.DATE: "Provide the date in YYYY-MM-DD format.",
         FieldType.SCALE: "Assign a numeric value within the indicated scale.",
         FieldType.ENUMERATED: "Choose one of the allowed values.",
-        FieldType.ORDERED: "Choose one of the ordered allowed values.",
+        FieldType.ORDERED: (
+            "Choose one of the ordered allowed values and write its NUMBER "
+            "(the index), not its label."
+        ),
         FieldType.TOPIC: "Assign a relevant thematic topic.",
     }
     return _GENERIC.get(field_type, "Fill this field according to its type.")
 
 
 def _format_values(spec: FieldSpec) -> List[str]:
-    """Formata lista de valores ORDERED/ENUMERATED para o prompt."""
+    """Formata lista de valores ORDERED/ENUMERATED para o prompt.
+
+    Em ORDERED o valor a escrever é o índice; o rótulo entra apenas como glosa
+    entre parênteses, para que o modelo entenda o significado sem confundi-lo
+    com o dado. A forma antiga (`11: Econômico`) sugeria os dois lados com o
+    mesmo peso e produzia anotações com o rótulo — hoje erro E088.
+    """
     lines = []
     for val in spec.values:
         if val.index >= 0:
-            label = f"      {val.index}: {val.label}"
+            label = f"      {val.index}  ({val.label})"
         else:
             label = f"      {val.label}"
         if val.description:
@@ -515,8 +533,8 @@ def _build_abstract_system_prompt(ctx: dict) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions) "
-            f"must be written in {lang}.\n"
+            f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions, "
+            f"TOPIC categories) must be written in {lang}.\n"
             "Exceptions: QUOTATION blocks preserve the original language of the source "
             "text. Concept names in CHAIN fields remain in the language used in "
             "EXISTING PROJECT CONCEPTS below."
@@ -652,7 +670,8 @@ def _build_abstract_values_system_prompt(ctx: dict) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT) must be written in {lang}. "
+            f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT, TOPIC) must be "
+            f"written in {lang}. "
             "QUOTATION values preserve the source language. Chain concepts stay in the "
             "language of EXISTING PROJECT CONCEPTS below."
         )
@@ -901,7 +920,8 @@ def _build_ontology_values_system_prompt(ctx: dict) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text values (TEXT) must be written in {lang}."
+            f"OUTPUT LANGUAGE: All free-text values (TEXT, TOPIC) must be written "
+            f"in {lang}."
         )
 
     if ctx.get("project_description"):
@@ -937,8 +957,8 @@ def _build_ontology_system_prompt(ctx: dict) -> str:
     lang = ctx.get("output_language")
     if lang:
         parts.append(
-            f"OUTPUT LANGUAGE: All free-text field values (TEXT descriptions) "
-            f"must be written in {lang}.\n"
+            f"OUTPUT LANGUAGE: All free-text field values (TEXT descriptions, "
+            f"TOPIC categories) must be written in {lang}.\n"
             "Exception: Concept names remain in the language used in the corpus."
         )
 

@@ -221,7 +221,13 @@ def field_to_schema(spec: FieldSpec) -> dict:
     if ftype == FieldType.CHAIN:
         return _chain_schema(spec)
 
-    if ftype in (FieldType.ENUMERATED, FieldType.ORDERED):
+    if ftype == FieldType.ORDERED:
+        # O dado de ORDERED é o ÍNDICE (o rótulo é só exibição — ver E088 no
+        # compilador). Oferecer rótulos aqui produziria .syn/.syno inválidos.
+        return _ordered_schema(spec)
+
+    if ftype == FieldType.ENUMERATED:
+        # ENUMERATED não tem ordem nem índice: o dado é o próprio rótulo.
         enum_values = _enum_values(spec)
         if enum_values:
             return {"enum": enum_values}
@@ -289,10 +295,51 @@ def _scale_schema(spec: FieldSpec) -> dict:
 
 
 def _enum_values(spec: FieldSpec) -> list:
-    """Extrai os labels permitidos de um campo ENUMERATED/ORDERED."""
+    """Extrai os labels permitidos de um campo ENUMERATED."""
     if not spec.values:
         return []
     return [v.label for v in spec.values]
+
+
+def _ordered_schema(spec: FieldSpec) -> dict:
+    """Schema de ORDERED: um inteiro restrito aos índices declarados.
+
+    COMPATIBILIDADE DE PROVEDOR: o Gemini (Google AI Studio) recusa com HTTP 400
+    qualquer `enum` de valores NUMÉRICOS — com ou sem `type: integer` —, sob a
+    mensagem enganosa "schema at top-level requires unspecified property '<x>'".
+    Enum de strings passa; enum de inteiros não. Medido em produção contra
+    `google/gemini-3.7-flash` (2026-08-20), onde cada recusa derrubava a chamada
+    para texto livre, descartando justamente as garantias do schema.
+
+    Como os índices de ORDERED são contíguos na prática (`[0]`, `[1]`, `[2]`…),
+    `minimum`/`maximum` expressam a MESMA restrição e são universalmente
+    aceitos. Quando houver lacuna na sequência (ex.: `[0..4]` e `[6..11]`, sem o
+    5), a faixa admitiria um índice inexistente — aí o `enum` é obrigatório e
+    preferimos a correção do dado à compatibilidade com um provedor.
+    """
+    indices = _ordered_indices(spec)
+    if not indices:
+        return {"type": "integer"}
+
+    lo, hi = min(indices), max(indices)
+    if sorted(indices) == list(range(lo, hi + 1)):
+        return {"type": "integer", "minimum": lo, "maximum": hi}
+    return {"enum": indices}
+
+
+def _ordered_indices(spec: FieldSpec) -> list:
+    """Extrai os índices permitidos de um campo ORDERED.
+
+    Em ORDERED o índice é o dado gravado: ele define a ordem e não admite
+    variantes de grafia. O rótulo pertence à declaração do template e é
+    reconstituído na apresentação (inlay hint do LSP).
+
+    Índices negativos são a sentinela de "sem prefixo `[N]`" do transformer e
+    nunca são valores válidos.
+    """
+    if not spec.values:
+        return []
+    return [v.index for v in spec.values if v.index >= 0]
 
 
 def _arity_min_items(arity: Optional[str]) -> Optional[int]:

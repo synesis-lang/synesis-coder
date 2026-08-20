@@ -327,12 +327,38 @@ async def _process_ontology_async(
     # reconfigurar aqui para preservar os níveis de -v/-q e o silenciamento de
     # loggers de terceiros.
 
-    # 1. Carregar projeto com anotações e ontologia existente
-    ctx = load_project(
-        project_path,
-        load_annotations=True,
-        load_ontology=True,
-    )
+    # 1. Carregar projeto com anotações; a ontologia existente só é necessária
+    # em `--update`, que a consulta para pular códigos já definidos.
+    #
+    # Fora de `--update` o .syno é integralmente REGERADO, então exigir que ele
+    # compile seria um impasse: um arquivo escrito sob regras anteriores (ex.:
+    # ORDERED com rótulo, hoje E088) abortaria a carga — impedindo justamente a
+    # regeneração que o corrigiria. Mesmo raciocínio já aplicado ao caminho
+    # `--prompt-only` abaixo.
+    #
+    # Anotações .syn desatualizadas também não impedem a geração: o modo lê
+    # delas apenas os códigos e o contexto semântico.
+    try:
+        ctx = load_project(
+            project_path,
+            load_annotations=True,
+            load_ontology=update,
+            tolerate_annotation_errors=True,
+        )
+    except ValueError as exc:
+        if not update:
+            raise
+        # Em `--update` o .syno existente é PRESERVADO e as novas entradas são
+        # anexadas a ele — por isso precisa compilar. Anexar a um arquivo
+        # inválido só produziria um arquivo inválido maior. A saída sem
+        # `--update` regenera tudo e não tem essa exigência.
+        raise ValueError(
+            f"{exc}\n\n"
+            "A ontologia existente não compila, e `--update` preserva o arquivo "
+            "atual para anexar as novas entradas.\n"
+            "Corrija os erros acima, ou rode SEM `--update` para regenerar "
+            "todas as entradas do zero."
+        ) from exc
 
     # 2. Verificar que o template tem ONTOLOGY scope
     if not ctx["has_ontology_scope"]:

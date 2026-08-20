@@ -1,6 +1,6 @@
 [project]
 name = "synesis-coder"
-version = "0.9.0"
+version = "0.10.0"
 description = "LLM-assisted annotation pipeline for the Synesis ecosystem"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,7 +29,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "synesis>=0.10.0",
+    "synesis>=0.12.0",
     "anthropic>=0.77.1",
     "openai>=1.0",
     "click>=8.0",

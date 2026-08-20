@@ -24,6 +24,7 @@ import re
 from typing import List
 
 from synesis.ast.nodes import FieldType
+from synesis.ast.normalize import normalize_label
 
 _INDENT = "    "  # 4 espaços — indentação canônica de campo Synesis
 
@@ -131,11 +132,46 @@ def _render_field(name: str, spec, value) -> List[str]:
     if ftype == FieldType.CHAIN:
         return [f"{name}: {chain_str}" for chain_str in _render_chains(value)]
 
+    if ftype == FieldType.ORDERED:
+        rendered = _render_ordered(spec, value)
+        return [f"{name}: {rendered}"] if rendered else []
+
     # Demais tipos: valor escalar textualizado, newlines normalizadas.
     rendered = _scalar_to_text(value)
     if not rendered:
         return []
     return [f"{name}: {rendered}"]
+
+
+def _render_ordered(spec, value) -> str:
+    """Emite o ÍNDICE de um campo ORDERED, resolvendo o rótulo se necessário.
+
+    O dado de ORDERED é o índice; escrever o rótulo é erro E088 no compilador.
+    O schema já restringe o caminho JSON aos índices, mas um backend que ignore
+    `enum` — ou o caminho de texto livre — ainda pode devolver o rótulo. Aqui a
+    resolução é determinística e independente do modelo, no mesmo espírito das
+    defesas já aplicadas a CODE (`_render_code`) e CHAIN (`_render_chains`).
+
+    Valor não resolvível é emitido como veio: quem reporta é o compilador, e
+    silenciar aqui esconderia o problema.
+    """
+    if isinstance(value, bool):  # bool é subclasse de int
+        return _scalar_to_text(value)
+    if isinstance(value, int):
+        return str(value)
+
+    text = _scalar_to_text(value)
+    if not text:
+        return ""
+    if text.lstrip("-").isdigit():
+        return text  # índice escrito como texto
+
+    values = getattr(spec, "values", None) or []
+    target = normalize_label(text)
+    for val in values:
+        if val.index >= 0 and normalize_label(val.label) == target:
+            return str(val.index)
+    return text
 
 
 def _render_code(value) -> str:

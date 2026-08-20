@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.0] — 2026-08-20
+
+Acompanha a canonização de `ORDERED` no compilador (synesis 0.12.0), corrige o
+idioma de `TOPIC` e remove dois bloqueios de campanha longa.
+
+⚠ **Exige `synesis>=0.12.0`** (antes `>=0.10.0`). O coder passa a gerar o
+índice em campos `ORDERED`, forma que só o compilador 0.12.0 aceita — com uma
+versão anterior o par ficaria incoerente sem aviso.
+
+### Changed — `ORDERED` passa a ser gerado como índice
+
+O compilador canonizou `ORDERED`: o dado gravado é o **índice**, e escrever o
+rótulo virou erro `E088`. O coder gerava justamente o rótulo — no corpus face85,
+184 dos 210 blocos —, então produzia arquivos que o compilador agora rejeita.
+
+- **Schema restringe `ORDERED` aos índices** (`schema_builder`). `_enum_values`
+  servia a `ORDERED` e `ENUMERATED` devolvendo sempre `v.label`; agora
+  `ORDERED` deriva do índice e `ENUMERATED` mantém os rótulos, já que não tem
+  ordem nem índice. Sem valores declarados, `ORDERED` degrada para
+  `{"type": "integer"}`.
+
+  A restrição é expressa como **faixa** (`type: integer` + `minimum`/`maximum`)
+  quando os índices são contíguos, e como `enum` quando há lacuna na sequência
+  — aí a faixa admitiria um índice que o template não declara.
+
+  A faixa não é preferência estética: o **Gemini recusa com HTTP 400 qualquer
+  `enum` de valores numéricos**, com ou sem `type: integer`, sob a mensagem
+  enganosa `schema at top-level requires unspecified property '<campo>'`, que
+  não menciona o enum. Enum de strings passa; de inteiros, não. Medido em
+  produção contra `google/gemini-3.7-flash`, onde cada recusa derrubava a
+  chamada para texto livre — descartando justamente as garantias do schema.
+  Verificado depois em `gemini-3.7-flash`, `gpt-5.6-luna` e
+  `claude-sonnet-4.5`: os três aceitam a faixa e devolvem inteiro.
+
+- **O saneamento para a Anthropic passa a preservar a restrição**
+  (`llm_client._sanitize_schema_for_anthropic`). A Anthropic não suporta
+  `minimum`/`maximum`, que eram simplesmente removidos — com a faixa, um campo
+  `ORDERED` chegaria como `{"type": "integer"}` puro e o modelo poderia
+  devolver qualquer inteiro. Agora uma faixa fechada de inteiros é reconstruída
+  como `enum` (formato que a Anthropic aceita) antes do descarte, inclusive na
+  forma nullable dos campos OPTIONAL. Faixas abertas ou muito grandes
+  continuam sendo reduzidas a `{"type": "integer"}`.
+
+  O mesmo vale para campos `SCALE`, que também perdiam os limites nesse
+  caminho.
+
+- **Prompt de texto livre passa a fixar a forma** (`prompt_builder`). A
+  instrução dizia apenas *"Choose one of the ordered allowed values"* e a lista
+  saía como `11: Econômico` — os dois lados com o mesmo peso, e o modelo
+  escolhia qualquer um. Agora a instrução exige o número e a lista dá saliência
+  ao índice, com o rótulo como glosa: `11  (Econômico) — custos, mercados`.
+
+- **Assembler resolve rótulo→índice** (`block_assembler._render_ordered`).
+  Defesa independente do backend, no mesmo espírito de `_render_code` e
+  `_render_chains`: um provedor que ignore o `enum` — ou o caminho de texto
+  livre — ainda pode devolver o rótulo, e a resolução é determinística
+  (tolerante a caixa e acento, via `normalize_label` do compilador). Valor não
+  resolvível é emitido como veio, para o compilador reportar.
+
+  Verificado de ponta a ponta: 210 blocos gerados com o **rótulo na entrada**
+  saem todos como `aspect: 11` e o projeto compila sem erros.
+
+### Fixed — `choices: null` do provedor virava "backend não suporta schema"
+
+- **Falha transitória custava as garantias do schema.** Quando um agregador
+  (OpenRouter) repassa uma recusa do provedor final dentro de um `200 OK` com
+  `choices: null`, o acesso `response.choices[0]` estourava um `TypeError` cru:
+
+  ```
+  [WARN] Caminho JSON (async) falhou na chamada ao backend
+         ('NoneType' object is not subscriptable) — caindo para texto livre.
+  ```
+
+  O chamador tratava isso como "este backend não suporta schema" e desistia do
+  caminho JSON — diagnóstico errado para um problema de infraestrutura que não
+  é do schema nem do modelo.
+
+  Agora a condição tem tipo próprio (`EmptyProviderResponse`), reporta o erro do
+  provedor quando ele vem no payload, e **é repetida uma vez** antes de desistir
+  — mesmo tratamento que o JSON malformado já recebia. Aplicado aos caminhos
+  síncrono e assíncrono.
+
+### Fixed — ontologia desatualizada impedia a própria regeneração
+
+- **`ontology` abortava por causa do `.syno` que ia substituir.** O modo
+  carregava a ontologia existente sempre (`load_ontology=True`), então um
+  arquivo escrito sob regras anteriores — por exemplo `ORDERED` com rótulo,
+  hoje erro `E088` — derrubava a carga do projeto e impedia justamente a
+  regeneração que o corrigiria:
+
+  ```
+  $ synesis-coder ontology --project face85.synp --output face85_rev.syno
+  Erro: Erro ao compilar projeto 'face85.synp':
+  [!] `aspect: Econômico` — em ORDERED grave o índice (11); o rótulo é só exibição
+  ```
+
+  Fora de `--update` o `.syno` é **integralmente regerado**, e a ontologia
+  antiga não é lida para nada: `ontology_index` só é consultado no ramo de
+  `--update`, para pular códigos já definidos. A carga passa a ser condicional
+  (`load_ontology=update`), e anotações `.syn` desatualizadas passam a ser
+  toleradas — o modo lê delas apenas os códigos e o contexto semântico. Mesmo
+  raciocínio que o caminho `--prompt-only` já adotava.
+
+- **`--update` continua exigindo uma ontologia válida**, agora dizendo por quê.
+  Ali o arquivo atual é preservado e as novas entradas são anexadas a ele, de
+  modo que anexar a um arquivo inválido só produziria um arquivo inválido
+  maior. A mensagem preserva o diagnóstico original e indica a saída:
+
+  ```
+  A ontologia existente não compila, e `--update` preserva o arquivo atual
+  para anexar as novas entradas.
+  Corrija os erros acima, ou rode SEM `--update` para regenerar todas as
+  entradas do zero.
+  ```
+
+### Fixed — `TOPIC` ignorava `SYNESIS_CODER_LANGUAGE`
+
+- **A instrução de idioma não citava `TOPIC`.** O texto restringia o escopo a
+  "free-text values (MEMO, TEXT)", e `FieldType.TOPIC` é tipo distinto de
+  `TEXT` — sem menção explícita, o modelo aplicava seu default (inglês) mesmo
+  com `SYNESIS_CODER_LANGUAGE=pt-BR`. No corpus face85 isso produziu 63 tópicos
+  em inglês enquanto os conceitos de `chain`, que têm regra própria, saíam em
+  português.
+
+  `TOPIC` foi incluído nos **6 sites** da instrução, que cobrem ontology,
+  abstract, document e dataset — o defeito não era exclusivo do modo ontology,
+  apenas invisível nos demais por ausência de campo `TOPIC` no template.
+
+  `ENUMERATED`/`ORDERED` ficam deliberadamente de fora: seus valores são
+  fixados pelo template e traduzi-los quebraria a validação.
+
+---
+
 ## [0.9.0] — 2026-08-18
 
 Robustez para campanhas longas (milhares de registros) e revisão calibrada.
@@ -1810,6 +1943,10 @@ automatic LLM correction loop.
 
 ---
 
+[0.10.0]: https://github.com/usuario/synesis-coder/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/usuario/synesis-coder/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/usuario/synesis-coder/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/usuario/synesis-coder/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/usuario/synesis-coder/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/usuario/synesis-coder/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/usuario/synesis-coder/compare/v0.5.0...v0.6.0

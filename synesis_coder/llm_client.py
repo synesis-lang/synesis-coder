@@ -217,15 +217,67 @@ def _anthropic_sdk_supports_output_config() -> bool:
     return supported
 
 
+#: Acima deste tamanho, uma faixa de inteiros NÃO é convertida em enum para a
+#: Anthropic: um enum enorme incharia o prompt sem ganho prático. Faixas de
+#: ORDERED são curtas por natureza (dezenas de valores, não milhares).
+_MAX_RANGE_TO_ENUM = 64
+
+
+def _integer_range_as_enum(node: dict) -> Optional[list]:
+    """Converte `{type: integer, minimum, maximum}` na lista de valores aceitos.
+
+    A Anthropic não suporta `minimum`/`maximum`, mas suporta `enum`. Sem esta
+    reconstrução, um campo ORDERED chegaria como `{"type": "integer"}` puro e o
+    modelo poderia devolver qualquer inteiro — perdendo justamente a restrição
+    que o schema existe para dar (o backend OpenAI-compatível recebe a faixa,
+    porque o Gemini recusa enum numérico; ver `schema_builder._ordered_schema`).
+
+    Retorna None quando o nó não é uma faixa de inteiros fechada ou é grande
+    demais para virar enum.
+    """
+    node_type = node.get("type")
+    # Aceita a forma nullable (`["integer", "null"]`) produzida por
+    # schema_builder._nullable para campos OPTIONAL do template.
+    nullable = isinstance(node_type, list) and set(node_type) == {"integer", "null"}
+    if node_type != "integer" and not nullable:
+        return None
+    lo, hi = node.get("minimum"), node.get("maximum")
+    if isinstance(lo, bool) or isinstance(hi, bool):
+        return None
+    if not isinstance(lo, int) or not isinstance(hi, int):
+        return None
+    if hi < lo or (hi - lo + 1) > _MAX_RANGE_TO_ENUM:
+        return None
+    values: list = list(range(lo, hi + 1))
+    if nullable:
+        values.append(None)
+    return values
+
+
 def _sanitize_schema_for_anthropic(schema: dict) -> dict:
-    """Remove recursivamente keywords de JSON Schema não suportados pela Anthropic.
+    """Adapta recursivamente o JSON Schema ao que a Anthropic suporta.
 
     Retorna uma cópia profunda saneada — o schema original (usado pelo backend
-    OpenAI, que aceita esses keywords) é preservado intacto. A remoção de
-    `minimum`/`maximum` etc. não enfraquece a validação: o `validate_and_fix`
-    roda sempre depois e o compilador Synesis reprova valores fora do range.
+    OpenAI, que aceita esses keywords) é preservado intacto.
+
+    Duas transformações:
+
+    1. Faixa fechada de inteiros (`type: integer` + `minimum`/`maximum`) vira
+       `enum` com os valores da faixa. A Anthropic não entende os limites mas
+       entende `enum`, então a restrição é PRESERVADA em vez de descartada.
+    2. Os demais keywords não suportados são removidos. Aí a validação não se
+       perde: `validate_and_fix` roda sempre depois e o compilador Synesis
+       reprova valores fora do intervalo.
     """
     if isinstance(schema, dict):
+        as_enum = _integer_range_as_enum(schema)
+        if as_enum is not None:
+            preserved = {
+                k: _sanitize_schema_for_anthropic(v)
+                for k, v in schema.items()
+                if k not in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS and k != "type"
+            }
+            return {**preserved, "enum": as_enum}
         return {
             k: _sanitize_schema_for_anthropic(v)
             for k, v in schema.items()
@@ -234,6 +286,25 @@ def _sanitize_schema_for_anthropic(schema: dict) -> dict:
     if isinstance(schema, list):
         return [_sanitize_schema_for_anthropic(v) for v in schema]
     return schema
+
+
+class EmptyProviderResponse(RuntimeError):
+    """A resposta chegou sem `choices` — o provedor falhou sem erro HTTP.
+
+    Ocorre quando um agregador (OpenRouter) repassa uma falha do provedor final
+    dentro de um 200 OK, com `choices: null`. É uma condição TRANSITÓRIA de
+    infraestrutura, não uma limitação do backend — daí a classe própria: sem
+    ela, o `TypeError` cru ('NoneType' object is not subscriptable) era
+    interpretado como "este backend não suporta schema" e derrubava a chamada
+    para texto livre, descartando as garantias estruturais por engano.
+    """
+
+    def __init__(self, error_payload: object = None) -> None:
+        self.error_payload = error_payload
+        detail = f" (erro do provedor: {error_payload})" if error_payload else ""
+        super().__init__(
+            f"resposta sem `choices` — falha transitória do provedor{detail}"
+        )
 
 
 class TokenBudgetExhausted(RuntimeError):
@@ -703,6 +774,21 @@ class LLMClient:
             except Exception as exc2:
                 self._log_budget_exhausted(exc2, retried=True)
                 return None
+        except EmptyProviderResponse as exc:
+            # Falha transitória de infraestrutura — ver nota em call_json_async.
+            _log.warning("Caminho JSON: %s — repetindo uma vez.", exc)
+            self._wait_if_rate_limited()
+            try:
+                raw = self._call_sync_inner(
+                    messages, temperature, max_tokens, thinking=False, schema=schema
+                )
+            except Exception as exc2:
+                _log.warning(
+                    "Re-tentativa também falhou (%s) — caindo para texto livre.",
+                    exc2,
+                )
+                self.usage.record_schema_fallback()
+                return None
         except Exception as exc:
             _log.warning(
                 "Caminho JSON falhou na chamada ao backend (%s) — "
@@ -821,6 +907,23 @@ class LLMClient:
                 )
             except Exception as exc2:
                 self._log_budget_exhausted(exc2, retried=True)
+                return None
+        except EmptyProviderResponse as exc:
+            # Falha transitória de infraestrutura: uma re-tentativa costuma
+            # bastar, e desistir aqui custaria as garantias do schema por um
+            # problema que não é do schema nem do modelo.
+            _log.warning(
+                "Caminho JSON (async): %s — repetindo uma vez.", exc,
+            )
+            await self._async_wait_if_rate_limited()
+            try:
+                raw = await asyncio.to_thread(_call_in_thread, max_tokens)
+            except Exception as exc2:
+                _log.warning(
+                    "Re-tentativa também falhou (%s) — caindo para texto livre.",
+                    exc2,
+                )
+                self.usage.record_schema_fallback()
                 return None
         except Exception as exc:
             _log.warning(
@@ -989,7 +1092,18 @@ class LLMClient:
                         cache_write_tok=_int_attr(details, "cache_write_tokens"),
                         cache_read_tok=_int_attr(details, "cached_tokens"),
                     )
-                choice = response.choices[0]
+                # `choices` pode vir None/vazio quando o provedor falha upstream
+                # sem devolver erro HTTP — o OpenRouter faz isso ao repassar uma
+                # recusa do provedor final. Sem esta guarda o acesso estoura
+                # `'NoneType' object is not subscriptable`, que o chamador
+                # interpreta como "backend não suporta schema" e usa para cair
+                # no texto livre: diagnóstico errado para uma falha transitória.
+                choices = getattr(response, "choices", None)
+                if not choices:
+                    err = getattr(response, "error", None)
+                    raise EmptyProviderResponse(err)
+
+                choice = choices[0]
                 finish = getattr(choice, "finish_reason", None)
                 if finish == "length":
                     _log.warning(
