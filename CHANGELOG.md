@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.11.0] — 2026-09-14
+
+Uma campanha em lote deixava de dar sinal de vida enquanto rodava. O
+pesquisador via silêncio por dezenas de minutos e um arquivo no fim — sem saber
+se faltava muito, se algo ia mal, nem sob que condições o motor estava
+operando. Esta versão torna a execução observável, do primeiro segundo ao
+resumo final.
+
+Nada foi removido nem mudou de contrato: sem configuração nova, o que já
+funcionava continua igual, apenas visível.
+
+### Added — indicador de progresso unificado (`progress.py`)
+
+`BatchProgress` emite uma linha periódica com posição, percentual, ritmo e ETA,
+e passa a ser a única implementação de progresso do coder. Antes havia **três**:
+uma completa no `finetune`, uma barra TTY no `document`, e um contador em
+`logger.debug` no `abstract` — que nunca aparecia, porque o nível padrão da CLI
+é INFO.
+
+```
+[ 18/25 |  72.0%] · 1 falha · 2 correções · 1 fallback | 1.4 ref/min | ETA ~4min
+```
+
+- **Throttling de 5s** (`DEFAULT_MIN_INTERVAL`): uma linha por registro numa
+  campanha de 2.800 é ruído. A última linha é sempre emitida.
+- **Ritmo na escala legível**: `ref/s` para API rápida, `ref/min` ou `ref/h`
+  para backend local — sem isso um modelo local mostraria `0.0 ref/s`.
+- **Sinais de ajuste** (falhas, correções, fallbacks) aparecem **durante** a
+  campanha, lidos do `TokenUsage` do cliente. Ver fallbacks subindo aos dez
+  minutos é o que permite parar e corrigir o contexto; vê-los só no fim é
+  tarde. Campanha limpa não exibe nenhum deles.
+- **Emissão por `logger.info` em stderr**, não escrita direta no terminal: o
+  stdout carrega o `.syn` no modo `plain`, `-q`/`-qq` silenciam naturalmente, e
+  a saída continua legível sob `nohup`, `| tee` e CI — onde barras que
+  reescrevem a linha viram lixo de escape. Por isso `_ChunkProgress`
+  (`document_mode`) foi removido em favor da linha textual.
+
+Cobertura: os **8 modos em lote** (`abstract`, `dataset`, `document`,
+`ontology`, `critique`, `normalize`, `refine`, `finetune`). Nos que usam
+`asyncio.gather` — que só retorna quando tudo termina — a notificação parte de
+dentro de cada tarefa, preservando as assinaturas existentes e a ordem do
+`gather`.
+
+### Added — sumário final unificado (`campaign_summary`)
+
+Fecha a campanha com o que custou, não apenas com quantos registros saíram:
+
+```
+──────────────────────────────────────────────────
+  Campanha    abstract · face85
+  Modelo      Qwen3.8-27B-GSQ-RCO-IQ3_S
+
+  Referências 25 total · 23 OK (92%) · 2 falhas
+  Retomadas   4 já processadas (puladas)
+
+  Tentativas  chamadas 31 · correções 3 · fallbacks 1
+  Tokens      in 412.300 · out 88.140 · cache r 310.220
+  Ritmo       40.2s por ref · 88 tok/s no lote
+
+  Tempo       16m45s
+  Saída       out/
+──────────────────────────────────────────────────
+```
+
+Todos os dados já eram medidos — `TokenUsage` conta chamadas, correções e
+fallbacks desde versões anteriores. O que faltava era exibi-los: os sumários do
+`abstract`, do `ontology` e do `finetune` eram emitidos em `logger.debug`.
+
+- **`Tentativas`** é a linha nova em substância: `chamadas` acima do total de
+  registros revela retrabalho (correções e fallbacks) que o contador de
+  OK/falhas não mostra.
+- **`Ritmo`** informa `tok/s no lote` — vazão agregada, não velocidade do
+  modelo: com concorrência maior que 1 há gerações simultâneas. Serve para
+  comparar campanhas (local vs. API), não para aferir o modelo.
+- **Duração legível** (`16m45s`, não `1005.0s`) e separador de milhar pt-BR.
+- **Colapso por disponibilidade**: sem cliente LLM, saem só contagem e tempo —
+  nunca "desconhecido".
+
+### Added — banner de motor e avisos de configuração (`model_facts.py`)
+
+O incidente que motivou esta parte: uma campanha inteira rodou com o servidor
+entregando **4.096 de 262.144** tokens de contexto — 1,5% da capacidade do
+modelo — sem que nada dissesse isso. O dado estava a uma chamada HTTP de
+distância.
+
+```
+  Modelo      Qwen3.8-27B-GSQ-RCO-IQ3_S · 26.9B parâmetros
+  Servidor    Ollama (192.168.1.47) · contexto 16.384 de 262.144
+  Execução    concorrência 1 · extração JSON · raciocínio desativado
+```
+
+`ModelFacts` é um registro comum preenchido por um adaptador por provedor —
+**Ollama** (`/api/show`: parâmetros, quantização, janela), **Anthropic**
+(`max_input_tokens`), **OpenRouter** (`context_length`), **Gemini** (rota
+**nativa** `/v1beta/models/{m}`, pois a compat-OpenAI não informa a janela) e
+**OpenAI**, que não expõe janela alguma. Quem exibe não conhece provedor
+nenhum; campos ausentes são omitidos, nunca impressos como "desconhecido".
+
+Três avisos passam a ser possíveis **antes** de a campanha começar:
+
+- **Contexto subutilizado** — servidor entregando menos de um quarto da janela
+  do modelo, com a variável a definir (`OLLAMA_CONTEXT_LENGTH`).
+- **Concorrência inadequada** — `--concurrent > 1` contra host local: as
+  chamadas disputam a mesma GPU em vez de rodarem em paralelo. O default de 5
+  do modo `abstract` foi a causa de uma campanha que levou horas.
+- **Prompt que não cabe** (`warn_prompt_too_large`) — o prompt é montado
+  localmente, então o excesso é detectável **antes** de a chamada ser paga; até
+  aqui só aparecia como erro 400 depois do gasto.
+
+**Metadado nunca derruba a campanha**: timeout de 3s, e qualquer falha degrada
+para o registro mínimo. A leitura da janela no Ollama é por **sufixo**
+(`*.context_length`), porque a chave é prefixada pela arquitetura
+(`qwen35.`, `llama.`) e varia por modelo.
+
+### Changed
+
+- `runtime_banner()` aceita `concurrent=` e emite o bloco de motor no lugar da
+  linha `Motor: backend/modelo`. A dica de atualizar `anthropic>=0.77.1`
+  em texto-livre foi preservada.
+- Sumários deixaram de ser emitidos por logger nos modos que já os **retornam**
+  — a CLI os imprime com `click.echo`, e logar também os mostrava duas vezes.
+  Regressão detectada em execução real e coberta por teste.
+- `dataset_mode` passou a emitir o banner de motor (era o único modo em lote
+  sem ele) e a contar **conclusões** em vez da posição na lista: com
+  concorrência as tarefas terminam fora de ordem, e o número saltava.
+
+### Tests
+
+Suíte de **731 → 790**. Novos: `tests/test_progress.py` (16),
+`tests/test_model_facts.py` (18) e casos em `tests/test_runtime_info.py`.
+Cobrem throttling, plurais concordando com a contagem, degradação sem cliente
+LLM, leitura de chave por sufixo entre arquiteturas, detecção de host privado,
+e a garantia de que um cliente `MagicMock` — como os modos são testados — não
+derruba nem o progresso nem o sumário.
+
+---
+
 ## [0.10.0] — 2026-08-20
 
 Acompanha a canonização de `ORDERED` no compilador (synesis 0.12.0), corrige o
@@ -1943,6 +2080,7 @@ automatic LLM correction loop.
 
 ---
 
+[0.11.0]: https://github.com/usuario/synesis-coder/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/usuario/synesis-coder/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/usuario/synesis-coder/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/usuario/synesis-coder/compare/v0.7.0...v0.8.0

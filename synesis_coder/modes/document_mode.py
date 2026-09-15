@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import sys
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -48,6 +47,7 @@ import synesis
 from synesis_coder.block_assembler import assemble_items, assemble_source
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import assert_bibref_known, load_project
 from synesis_coder.prompt_builder import (
     build_document_prompt,
@@ -79,57 +79,6 @@ def _human_chars(n: int) -> str:
         return f"{n / 1000:.0f}k"
     return str(n)
 
-
-class _ChunkProgress:
-    """Indicador de progresso para chunks processados em paralelo.
-
-    Renderiza `[INFO] Processando: [████████····] 8/12 chunks (N falhas)`,
-    reescrevendo a linha in-place quando a saída é um TTY. Em pipes/redireções
-    ou com logging em nível DEBUG o indicador é suprimido.
-    """
-
-    _FILL = "█"
-    _EMPTY = "·"
-    _BAR_WIDTH = 12
-
-    def __init__(self, total: int, stream=None) -> None:
-        self.total = total
-        self.stream = stream or sys.stderr
-        self.done: dict[int, bool] = {}
-        self.enabled = (
-            self.total > 0
-            and hasattr(self.stream, "isatty")
-            and self.stream.isatty()
-            and logger.isEnabledFor(logging.INFO)
-            and not logger.isEnabledFor(logging.DEBUG)
-        )
-
-    def start(self) -> None:
-        if not self.enabled:
-            return
-        self._render()
-
-    def mark(self, idx: int, success: bool) -> None:
-        if not self.enabled:
-            return
-        self.done[idx] = success
-        self._render()
-
-    def _render(self) -> None:
-        n_done = len(self.done)
-        n_fail = sum(1 for ok in self.done.values() if not ok)
-        filled = round(n_done / self.total * self._BAR_WIDTH) if self.total else 0
-        bar = self._FILL * filled + self._EMPTY * (self._BAR_WIDTH - filled)
-        fail_str = f" ({n_fail} falhas)" if n_fail else ""
-        line = f"[INFO] Processando: [{bar}] {n_done}/{self.total} chunks{fail_str}"
-        self.stream.write(f"\r{line}")
-        self.stream.flush()
-
-    def finish(self) -> None:
-        if not self.enabled:
-            return
-        self.stream.write("\n")
-        self.stream.flush()
 
 # Regex para cabeçalhos ATX Markdown (# … ######)
 _ATX_HEADER = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
@@ -901,7 +850,7 @@ async def _process_document_async(
     # 4. Inicializar LLM client (com recorder de debug se solicitado)
     recorder = DebugRecorder() if debug else None
     llm_client = LLMClient(model=model, recorder=recorder)
-    runtime_banner(llm_client, format=format)
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     if recorder is not None:
         recorder.record_session_header(
@@ -939,8 +888,7 @@ async def _process_document_async(
     total_ok = 0
     total_fail = 0
 
-    progress = _ChunkProgress(total_chunks)
-    progress.start()
+    progress = BatchProgress(total_chunks, unit="chunk", usage=llm_client.usage)
     for coro in asyncio.as_completed(tasks):
         idx, item_blocks, success = await coro
         results_by_index[idx] = item_blocks
@@ -948,8 +896,7 @@ async def _process_document_async(
             total_ok += 1
         else:
             total_fail += 1
-        progress.mark(idx, success)
-    progress.finish()
+        progress.mark(success=success)
 
     # 7. Combinar ITEMs em ordem de chunk
     all_item_blocks: List[str] = []

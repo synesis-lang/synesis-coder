@@ -26,12 +26,17 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from synesis_coder.block_assembler import assemble_ontology
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import (
     build_ontology_prompt,
     build_ontology_values_prompt,
 )
-from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
+from synesis_coder.runtime_info import (
+    campaign_summary,
+    runtime_banner,
+    warn_schema_fallbacks,
+)
 from synesis_coder.schema_builder import build_ontology_schema
 from synesis_coder.synr_io import safe_write_output
 from synesis_coder.validator import validate_ontology_entry_async
@@ -392,7 +397,7 @@ async def _process_ontology_async(
 
     # 5. Inicializar LLM client
     llm_client = LLMClient(model=model)
-    runtime_banner(llm_client, format=format)
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     # 6. Processar concorrentemente
     semaphore = asyncio.Semaphore(concurrent)
@@ -403,23 +408,21 @@ async def _process_ontology_async(
         for code in pending_codes
     ]
 
-    processed = 0
     total_ok = 0
     total_fail = 0
     results: List[Tuple[str, str]] = []  # (code, syno_output) — apenas válidos
     rejected: List[Tuple[str, str]] = []  # (code, syno_output) — falharam validação
 
+    progress = BatchProgress(total, unit="cód", usage=llm_client.usage)
     for coro in asyncio.as_completed(tasks):
         code, syno_output, success = await coro
-        processed += 1
         if success:
             total_ok += 1
             results.append((code, syno_output))
         else:
             total_fail += 1
             rejected.append((code, syno_output))
-        status = "OK" if success else "FALHA"
-        logger.info("[%d/%d] %s: %s", processed, total, code, status)
+        progress.mark(success=success, detail=code)
 
     # 7. Combinar entradas VÁLIDAS e gravar .syno
     # Blocos que falharam a validação (com `# ERRO: validação falhou` e texto
@@ -473,20 +476,23 @@ async def _process_ontology_async(
         )
 
     elapsed = time.monotonic() - start_time
-    rate = (total_ok / total * 100) if total > 0 else 0
 
     # Degradação silenciosa: entradas que caíram para texto livre rodaram sem
     # as restrições do schema (enum de topic, additionalProperties).
     warn_schema_fallbacks(llm_client)
 
-    summary = (
-        f"Processamento concluído em {elapsed:.1f}s\n"
-        f"  Total: {total}\n"
-        f"  OK: {total_ok} ({rate:.0f}%)\n"
-        f"  Falhas: {total_fail}\n"
-        f"  Saída: {output_path}"
+    summary = campaign_summary(
+        mode="ontology",
+        project=project_path.stem,
+        total=total,
+        ok=total_ok,
+        failed=total_fail,
+        elapsed=elapsed,
+        output=str(output_path),
+        llm_client=llm_client,
+        unit="entradas",
     )
-    logger.debug(summary)
+    # Sumário é o valor de RETORNO do modo; a CLI o imprime. Logar duplicaria.
 
     if format == "verbose":
         header = (

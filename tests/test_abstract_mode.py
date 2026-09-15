@@ -614,7 +614,7 @@ class TestAbstractModeIntegration:
                 per_reference=True,
             )
 
-            assert "OK:" in result
+            assert "OK" in result and "Campanha" in result
             assert output_dir.exists()
 
             # Verificar que os .syn foram criados

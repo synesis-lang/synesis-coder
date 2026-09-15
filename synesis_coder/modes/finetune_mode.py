@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.progress import BatchProgress
 from synesis_coder.runtime_info import runtime_banner
 from synesis_coder.synr_io import safe_write_output
 
@@ -407,30 +408,6 @@ def process_finetune(
     )
 
 
-def _fmt_eta(seconds: float) -> str:
-    """Formata segundos restantes como string legível."""
-    if seconds < 60:
-        return f"~{int(seconds)}s"
-    elif seconds < 3600:
-        return f"~{int(seconds / 60)}min"
-    else:
-        h = int(seconds / 3600)
-        m = int((seconds % 3600) / 60)
-        return f"~{h}h{m:02d}m"
-
-
-def _fmt_rate(pairs_per_sec: float) -> str:
-    """Formata taxa de processamento."""
-    if pairs_per_sec >= 1.0:
-        return f"{pairs_per_sec:.1f} p/s"
-    else:
-        return f"{pairs_per_sec * 60:.1f} p/min"
-
-
-# Intervalo mínimo entre linhas de progresso (segundos)
-_PROGRESS_INTERVAL = 5.0
-
-
 async def _process_finetune_async(
     output_path: Path,
     project_path: Optional[Path],
@@ -484,7 +461,7 @@ async def _process_finetune_async(
         )
 
         llm_client = LLMClient(model=model)
-        runtime_banner(llm_client, format=format)
+        runtime_banner(llm_client, format=format, concurrent=concurrent)
         semaphore = asyncio.Semaphore(concurrent)
 
         tasks = [
@@ -492,10 +469,8 @@ async def _process_finetune_async(
             for pair in pairs
         ]
 
-        processed = 0
         total_new = 0
-        enrich_start = time.monotonic()
-        last_log_time = enrich_start
+        progress = BatchProgress(total_to_process, unit="par", usage=llm_client.usage)
 
         for coro in asyncio.as_completed(tasks):
             new_pairs, counts = await coro
@@ -503,27 +478,7 @@ async def _process_finetune_async(
             total_new += len(new_pairs)
             for t, n in counts.items():
                 type_totals[t] += n
-            processed += 1
-
-            now = time.monotonic()
-            is_last = processed == total_to_process
-            if is_last or (now - last_log_time) >= _PROGRESS_INTERVAL:
-                elapsed_e = now - enrich_start
-                rate = processed / elapsed_e if elapsed_e > 0 else 0.0
-                remaining = total_to_process - processed
-                eta_str = _fmt_eta(remaining / rate) if rate > 0 and not is_last else ""
-                pct = processed / total_to_process * 100
-
-                parts = [
-                    f"[{processed:>{len(str(total_to_process))}}/{total_to_process} | {pct:5.1f}%]",
-                    f"+{total_new} novos",
-                    f"| {_fmt_rate(rate)}",
-                ]
-                if eta_str:
-                    parts.append(f"| ETA {eta_str}")
-
-                logger.info(" ".join(parts))
-                last_log_time = now
+            progress.mark(detail=f"+{total_new} novos")
     else:
         llm_client = None  # type: ignore[assignment]
 
@@ -571,7 +526,9 @@ async def _process_finetune_async(
     ]
     summary = "\n".join(summary_lines)
 
-    logger.debug(summary)
+    # Vocabulário próprio (pares, duplicatas, descartados) não mapeia no
+    # campaign_summary genérico. Não logar: é o valor de RETORNO, impresso
+    # pela CLI — logar aqui mostraria o bloco duas vezes.
 
     if format == "verbose":
         source_label = (

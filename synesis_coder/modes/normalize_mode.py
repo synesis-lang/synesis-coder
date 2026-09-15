@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_normalization_prompt
 from synesis_coder.runtime_info import runtime_banner
@@ -554,7 +555,7 @@ async def _process_normalize_async(
 
     # 6. LLM para grupos residuais (chunked, concurrent)
     llm_client = LLMClient(model=model)
-    runtime_banner(llm_client, format=format)
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
     llm_updates = 0
 
     if residual_groups:
@@ -574,7 +575,15 @@ async def _process_normalize_async(
                     return []
                 return _parse_normalization_response(raw)
 
-        chunk_results = await asyncio.gather(*[_process_chunk(chunk) for chunk in chunks])
+        # Wrapper de progresso: ver nota equivalente em critique_mode.
+        progress = BatchProgress(len(chunks), unit="lote", usage=llm_client.usage)
+
+        async def _tracked(chunk):
+            result = await _process_chunk(chunk)
+            progress.mark()
+            return result
+
+        chunk_results = await asyncio.gather(*[_tracked(c) for c in chunks])
         all_suggestions = [s for chunk in chunk_results for s in chunk]
 
         llm_updates = _apply_llm_suggestions(inventory, all_suggestions, confidence_threshold)

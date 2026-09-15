@@ -28,6 +28,7 @@ from typing import Optional
 
 from synesis_coder.critique_taxonomy import VALID_REASONS, validate_reason
 from synesis_coder.llm_client import LLMClient, get_critique_connection
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_critique_prompt
 from synesis_coder.revision_vocab import (
@@ -623,7 +624,7 @@ async def _process_critique_async(
     #    A conexão de crítica (2ª API opcional) permite avaliar num provedor
     #    distinto do gerador; sem vars CRITIQUE_* de conexão, herda a global.
     llm_client = LLMClient(model=model, **get_critique_connection())
-    runtime_banner(llm_client, format=format)
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     # 5. Processar ITEMs de forma concorrente
     semaphore = asyncio.Semaphore(concurrent)
@@ -652,8 +653,20 @@ async def _process_critique_async(
         for (bibref, item_block), position in zip(items_with_bibrefs, positions)
     ]
 
+    # Wrapper de progresso: `gather` só retorna quando TUDO termina, então a
+    # notificação tem de partir de dentro de cada tarefa. Envolver preserva a
+    # assinatura de _critique_single_item e a ordem do gather.
+    progress = BatchProgress(len(tasks), unit="item", usage=llm_client.usage)
+
+    async def _tracked(task):
+        result = await task
+        progress.mark()
+        return result
+
     # gather preserva ordem: revision_results[i] corresponde a items_with_bibrefs[i]
-    revision_results: list[Optional[dict]] = await asyncio.gather(*tasks)
+    revision_results: list[Optional[dict]] = await asyncio.gather(
+        *(_tracked(t) for t in tasks)
+    )
 
     # 6. Contabilizar
     items_flagged = sum(1 for r in revision_results if r is not None)

@@ -31,7 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from synesis_coder.block_assembler import count_item_blocks, dedupe_item_blocks
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.modes.abstract_mode import _generate_abstract_syn
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
+from synesis_coder.runtime_info import campaign_summary, runtime_banner
 from synesis_coder.validator import validate_and_fix_async
 
 logger = logging.getLogger(__name__)
@@ -230,8 +232,10 @@ async def _process_dataset_async(
     semaphore = asyncio.Semaphore(concurrent)
     external = _external_origin_fields(ctx)
 
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
     logger.info("Iniciando geração (concurrent=%d)", concurrent)
     start_time = time.monotonic()
+    progress = BatchProgress(len(entries), unit="reg", usage=llm_client.usage)
 
     async def _one(index: int, entry: Dict[str, str]) -> Tuple[str, bool]:
         async with semaphore:
@@ -276,19 +280,33 @@ async def _process_dataset_async(
                 )
 
             _write_syn(output_dir, bibref, final, per_record)
-            logger.info(
-                "[%d/%d] %s — %s", index + 1, len(entries), bibref,
-                "OK" if ok else ("SEM ITEMs" if n_items == 0 else "FALHA NA VALIDAÇÃO"),
+            # `index` é a posição na lista, não o quanto já terminou: com
+            # concorrência as tarefas concluem fora de ordem. BatchProgress
+            # conta conclusões, que é o que o pesquisador acompanha.
+            status = (
+                "OK" if ok
+                else ("SEM ITEMs" if n_items == 0 else "FALHA NA VALIDAÇÃO")
             )
+            progress.mark(success=ok, detail=f"{bibref} — {status}")
             return bibref, ok
 
     results = await asyncio.gather(*(_one(i, e) for i, e in enumerate(entries)))
     ok = sum(1 for _, s in results if s)
     elapsed = time.monotonic() - start_time
-    return (
-        f"Processados {len(results)} registro(s): {ok} OK, "
-        f"{len(results) - ok} com falha ({elapsed:.1f}s)."
+
+    summary = campaign_summary(
+        mode="dataset",
+        project=project_path.stem,
+        total=len(results),
+        ok=ok,
+        failed=len(results) - ok,
+        elapsed=elapsed,
+        output=str(output_dir),
+        llm_client=llm_client,
+        unit="registros",
     )
+    # Sumário é o valor de RETORNO do modo; a CLI o imprime. Logar duplicaria.
+    return summary
 
 
 def _write_syn(output_dir: Path, bibref: str, content: str, per_record: bool) -> None:

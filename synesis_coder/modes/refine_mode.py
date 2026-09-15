@@ -47,6 +47,7 @@ from synesis_coder.modes.critique_mode import (
     _resolve_project,
     _score_of,
 )
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import (
     build_item_refinement_prompt,
@@ -446,7 +447,7 @@ async def _process_refine_async(
     # ambos usam a conexão global (comportamento atual).
     critique_client = LLMClient(model=critique_model, **get_critique_connection())
     refine_client = LLMClient(model=refine_model)
-    runtime_banner(refine_client, format=format)
+    runtime_banner(refine_client, format=format, concurrent=concurrent)
 
     semaphore = asyncio.Semaphore(concurrent)
     tasks = [
@@ -463,8 +464,18 @@ async def _process_refine_async(
         )
         for bibref, item_block in items_with_bibrefs
     ]
+    # Wrapper de progresso: ver nota equivalente em critique_mode.
+    progress = BatchProgress(len(tasks), unit="item", usage=refine_client.usage)
+
+    async def _tracked(task):
+        result = await task
+        progress.mark()
+        return result
+
     # gather preserva ordem: results[i] casa com items_with_bibrefs[i].
-    results: list[RefineResult] = await asyncio.gather(*tasks)
+    results: list[RefineResult] = await asyncio.gather(
+        *(_tracked(t) for t in tasks)
+    )
 
     items_improved = sum(1 for r in results if r.improved)
     _log.info(

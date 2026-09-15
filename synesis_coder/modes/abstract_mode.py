@@ -34,9 +34,14 @@ from synesis_coder.block_assembler import (
 )
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_abstract_prompt, build_abstract_values_prompt
-from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
+from synesis_coder.runtime_info import (
+    campaign_summary,
+    runtime_banner,
+    warn_schema_fallbacks,
+)
 from synesis_coder.schema_builder import build_abstract_schema
 from synesis_coder.synr_io import safe_write_output
 from synesis_coder.validator import validate_and_fix_async
@@ -797,7 +802,7 @@ async def _process_abstract_async(
         coding_step_title="Etapa 1 — Codificação dos abstracts",
     ) if debug else None
     llm_client = LLMClient(model=model, recorder=recorder)
-    runtime_banner(llm_client, format=format)
+    runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     if recorder is not None:
         recorder.record_session_header(
@@ -817,14 +822,10 @@ async def _process_abstract_async(
     total_fail = 0
     start_time = time.monotonic()
 
-    # Contador de progresso
-    processed = 0
+    batch_progress = BatchProgress(total, unit="ref", usage=llm_client.usage)
 
     def _progress(bibref: str, success: bool) -> None:
-        nonlocal processed
-        processed += 1
-        status = "OK" if success else "FALHA"
-        logger.debug("[%d/%d] %s: %s", processed, total, bibref, status)
+        batch_progress.mark(success=success, detail=bibref)
 
     # Carga inicial fora do loop: se o projeto não compila ANTES de começar, é
     # erro de configuração e deve abortar. O try dentro do loop protege apenas
@@ -947,29 +948,25 @@ async def _process_abstract_async(
                 await asyncio.sleep(cooldown)
 
     elapsed = time.monotonic() - start_time
-    rate = (total_ok / total * 100) if total > 0 else 0
 
     # Degradação silenciosa: registros que caíram para texto livre contam como
     # OK, mas rodaram sem as restrições do schema. Avisar antes do resumo.
     warn_schema_fallbacks(llm_client)
 
-    _sep = "-" * 50
-    resume_line = (
-        f"  Retomados : {skipped_resume} já processados (pulados)\n"
-        if skipped_resume
-        else ""
+    summary = campaign_summary(
+        mode="abstract",
+        project=project_path.stem,
+        total=total,
+        ok=total_ok,
+        failed=total_fail,
+        elapsed=elapsed,
+        output=str(output_dir),
+        llm_client=llm_client,
+        unit="referências",
+        skipped=skipped_resume,
     )
-    summary = (
-        f"\n{_sep}\n"
-        f"  Total     : {total} referências\n"
-        f"{resume_line}"
-        f"  OK        : {total_ok} ({rate:.0f}%)\n"
-        f"  Falhas    : {total_fail}\n"
-        f"  Tempo     : {elapsed:.1f}s\n"
-        f"  Saída     : {output_dir}\n"
-        f"{_sep}"
-    )
-    logger.debug(summary)
+    # Não emitir por logger: o sumário é o valor de RETORNO do modo, e a CLI o
+    # imprime com click.echo. Logar aqui o mostraria duas vezes.
 
     # Gravar relatório de debug (--debug)
     if recorder is not None:
