@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [0.12.0] — 2026-09-28
 
-Correções sobre a 0.11.0, a partir do primeiro uso em campanha real com backend
-local. Ambas vieram de observação em execução, não de teste.
+⚠ **Exige `synesis>=0.13.1`.** Projetos com vários `.bib`, pastas em `INCLUDE`
+e lotes de anotação; proteções de campanha contra troca de bibref (rodada Kely);
+leitura de `.bib` idêntica com o bibtexparser 1.x e 2.x.
+
+As duas primeiras correções vieram do primeiro uso em campanha real com backend
+local, por observação em execução, não de teste.
 
 ### Fixed — a campanha não anunciava que havia começado
 
@@ -2238,6 +2242,7 @@ automatic LLM correction loop.
 
 ---
 
+[0.12.0]: https://github.com/usuario/synesis-coder/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/usuario/synesis-coder/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/usuario/synesis-coder/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/usuario/synesis-coder/compare/v0.8.0...v0.9.0

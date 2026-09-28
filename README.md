@@ -19,10 +19,10 @@ from the project template.
 
 | Package | This version | Requires `synesis` | Python |
 |---|---|---|---|
-| synesis | 0.11.0 | — | ≥3.10 |
-| synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
-| synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
-| synesis-graph | 0.5.0 | ≥0.10.0 | ≥3.10 |
+| synesis | 0.13.1 | — | ≥3.10 |
+| synesis-coder | 0.12.0 | ≥0.13.1 | ≥3.10 |
+| synesis-lsp | 0.23.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.11.0 | ≥0.10.0 | ≥3.10 |
 
 ## Installation
 
