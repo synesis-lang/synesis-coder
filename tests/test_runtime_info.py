@@ -281,14 +281,37 @@ def test_engine_banner_does_not_repeat_quantization_in_name():
     assert out.count("IQ3_S") == 1
 
 
-def test_warns_when_server_serves_a_fraction_of_the_window():
-    # O incidente real: 4.096 de 262.144.
+def test_warns_when_server_is_at_vendor_default():
+    # O incidente real: 4.096 (default de fábrica) com o modelo em 262.144.
     from synesis_coder.model_facts import ModelFacts
 
     warnings = engine_warnings(
         ModelFacts("m", context_window=262144, context_served=4096, host="h")
     )
     assert any("OLLAMA_CONTEXT_LENGTH" in w for w in warnings)
+
+
+def test_does_not_prescribe_a_context_number():
+    # O coder não sabe a VRAM da máquina: sugerir um valor concreto pode
+    # empurrar para configuração que vaza para a RAM. A orientação é
+    # condicional ("o maior valor que a VRAM comportar").
+    from synesis_coder.model_facts import ModelFacts
+
+    warnings = engine_warnings(
+        ModelFacts("m", context_window=262144, context_served=4096, host="h")
+    )
+    texto = " ".join(warnings)
+    assert "VRAM" in texto
+    assert "262.144" not in texto  # nunca o máximo do modelo como alvo
+
+
+def test_no_context_warning_for_deliberate_sizing():
+    from synesis_coder.model_facts import ModelFacts
+
+    warnings = engine_warnings(
+        ModelFacts("m", context_window=262144, context_served=16384, host="h")
+    )
+    assert not any("OLLAMA_CONTEXT_LENGTH" in w for w in warnings)
 
 
 def test_warns_when_concurrency_high_against_local_server():

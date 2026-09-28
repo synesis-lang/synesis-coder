@@ -80,15 +80,26 @@ class ModelFacts:
         return self.host is not None
 
     @property
-    def context_underused(self) -> bool:
-        """True quando o servidor entrega menos de um quarto da capacidade.
+    def context_at_vendor_default(self) -> bool:
+        """True quando a janela servida é o default de fábrica do servidor.
 
-        O limiar é conservador de propósito: servir metade da janela pode ser
-        decisão deliberada de memória; servir 1,5% é engano de configuração.
+        Não se compara a janela servida com a do modelo por fração: quanto
+        contexto cabe depende da VRAM da máquina, que o coder não conhece, e o
+        KV cache cresce linearmente com o contexto disputando a mesma memória
+        dos pesos. Servir bem menos que o máximo costuma ser dimensionamento
+        CORRETO — alertar ali empurraria o pesquisador para uma configuração
+        que vaza para a RAM e fica ordens de grandeza mais lenta.
+
+        O que se pode afirmar sem conhecer o hardware é outra coisa: 4.096 é o
+        default histórico do Ollama, herdado por quem nunca definiu
+        `OLLAMA_CONTEXT_LENGTH`. Não é escolha, é ausência de escolha — e é
+        pequeno demais para os prompts deste coder, que passam de 7.000 tokens
+        só de template.
         """
-        if not self.context_window or not self.context_served:
+        if not self.context_served or not self.context_window:
             return False
-        return self.context_served < self.context_window * 0.25
+        # Só faz sentido chamar de "default" se o modelo comporta mais.
+        return self.context_served == 4096 < self.context_window
 
 
 def _http_json(url: str, *, data: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[dict]:
@@ -159,7 +170,7 @@ def _facts_ollama(model: str, api_url: str) -> Optional[ModelFacts]:
             break
 
     return ModelFacts(
-        display_name=short_name(model),
+        display_name=_ollama_display_name(model, info),
         context_window=_suffix_key(info, ".context_length"),
         context_served=served,
         parameters=details.get("parameter_size"),
@@ -167,6 +178,24 @@ def _facts_ollama(model: str, api_url: str) -> Optional[ModelFacts]:
         host=host,
         source="Ollama",
     )
+
+
+def _ollama_display_name(model: str, info: dict) -> str:
+    """Nome do MODELO, não da tag.
+
+    `short_name` corta o ID no `:`, o que serve para tags como
+    `qwen3:27b` mas falha nos GGUF do Hugging Face, onde o que vem depois do
+    `:` é a QUANTIZAÇÃO: `.../gemma-4-26B-A4B-it-GGUF:UD-Q3_K_XL` exibia
+    "UD-Q3_K_XL" como se fosse o nome do modelo.
+
+    Os metadados do GGUF trazem o nome real em `general.basename`; a tag só
+    entra como último recurso.
+    """
+    for key in ("general.basename", "general.base_model.0.name"):
+        value = (info or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return short_name(model)
 
 
 def _facts_anthropic(model: str) -> Optional[ModelFacts]:

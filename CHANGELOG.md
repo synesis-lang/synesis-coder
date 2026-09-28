@@ -7,6 +7,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+Correções sobre a 0.11.0, a partir do primeiro uso em campanha real com backend
+local. Ambas vieram de observação em execução, não de teste.
+
+### Fixed — a campanha não anunciava que havia começado
+
+`BatchProgress` só emitia ao concluir uma unidade. Num backend lento — 20
+abstracts a dezenas de minutos cada — a primeira linha levaria mais de meia
+hora, e o terminal ficava indistinguível de um processo travado. Justamente o
+silêncio que a 0.11.0 se propôs a eliminar, sobrevivendo no intervalo inicial.
+
+`BatchProgress.start()` anuncia o total antes da primeira chamada, e os 8 modos
+em lote passam a chamá-lo. Um teste varre `modes/*_mode.py` e falha se algum
+instanciar `BatchProgress` sem anunciar o início.
+
+O `dataset` perdeu a linha `"Iniciando geração (concurrent=N)"`: a concorrência
+já aparece no banner de motor e o início agora é anunciado pelo progresso — três
+mensagens para o mesmo fato.
+
+### Added — `SYNESIS_CODER_CONCURRENT` no `.env`
+
+`--concurrent` só existia na linha de comando, com defaults divergentes por
+comando (5 em `abstract`/`dataset`/`ontology`/`finetune`, 3 nos demais). Num
+servidor local o valor correto é 1 — e o pesquisador precisava lembrar da flag
+em **cada** comando, sem nada avisá-lo se esquecesse.
+
+O valor adequado depende de que servidor atende, que é exatamente o que o `.env`
+já descreve em `BACKEND`/`API_URL`/`MODEL`. Precedência:
+
+```
+--concurrent (flag)  →  SYNESIS_CODER_CONCURRENT (.env)  →  default do comando
+```
+
+A flag vence porque descreve **esta** execução; o `.env` descreve o ambiente
+habitual. Os defaults históricos de cada modo são preservados quando nada é
+configurado, então nada muda para quem não define a variável. Valor inválido
+(não-inteiro, zero, negativo) cai no default com aviso — configuração errada não
+derruba a campanha, e um `0` travaria o semáforo.
+
+### Fixed — banner mostrava a quantização no lugar do nome do modelo
+
+Com GGUF do Hugging Face o banner exibia `Modelo UD-Q3_K_XL · Q3_K_M`. O nome
+saía de `short_name()`, que corta o ID no `:` — correto para tags como
+`qwen3:27b`, errado aqui, onde o que vem depois do `:` é a **quantização**.
+
+Passa a ler `general.basename` dos metadados do GGUF, com a tag como último
+recurso: `Modelo Gemma-4-26B-A4B-It · 25.2B parâmetros · Q3_K_M`.
+
+### Changed — `--output-dir` deixa de ser obrigatório
+
+`abstract` e `dataset` exigiam o destino, e o comando mais curto — o da primeira
+tentativa de quem experimenta o modo — parava com `Missing option
+'--output-dir'`. Ambos passam a usar o **diretório atual** como padrão: é onde o
+pesquisador está e onde espera encontrar o resultado.
+
+A proteção contra sobrescrita continua valendo, agora com mais razão de ser: um
+`annotations.syn` preexistente na pasta interrompe o comando e sugere
+`--overwrite` ou `--resume`.
+
+O `finetune` mantém `--output` obrigatório — ali a saída é um **arquivo**
+(JSONL), sem nome óbvio por padrão, não uma pasta.
+
+### Fixed — o aviso de contexto empurrava para configuração pior
+
+O alerta comparava a janela servida com a do modelo por fração (menos de 25% ⇒
+avisa) e sugeria aumentar `OLLAMA_CONTEXT_LENGTH`, citando o máximo do modelo.
+
+**O critério era inválido.** Quanto contexto cabe depende da VRAM da máquina,
+que o coder não conhece: o KV cache cresce linearmente com o contexto e disputa
+memória com os pesos. Num modelo de janela muito grande, usá-la inteira é
+inviável na maioria das placas — servir menos costuma ser dimensionamento
+correto. Seguir o aviso ao pé da letra faz o modelo vazar para a RAM do sistema,
+onde a CPU processa as camadas excedentes: ordens de grandeza mais lento, o
+oposto do pretendido.
+
+Caso medido que motivou a correção: servidor entregando 16.384 de 262.144
+(6,25%) era o **teto viável** da placa — e o coder alertava como se fosse
+defeito.
+
+A propriedade `context_underused` deu lugar a `context_at_vendor_default`, que
+não compara fração alguma: detecta a janela em **4.096**, o default de fábrica
+do Ollama, herdado por quem nunca definiu a variável. Não é escolha, é ausência
+de escolha — e é a única coisa afirmável sem conhecer o hardware. O nome
+anterior também carregava o juízo errado: "subutilizado" pressupõe que usar mais
+seria melhor.
+
+A mensagem deixou de prescrever número: orienta a usar "o maior valor que a VRAM
+comportar", explicando o custo do KV cache. Um teste garante que ela nunca cite
+o máximo do modelo como alvo.
+
+### Fixed — campanha `abstract` atribuía o texto a outro artigo, marcado OK
+
+Rodada da Kely (face85, 65 referências): **nenhuma** das 65 chaves saiu certa,
+inclusive nos 47 registros marcados OK. Havia três defeitos, cada um silencioso.
+
+1. **O `.bib` do `--input` nunca entra na validação**, que confere cada saída
+   contra o `INCLUDE BIBLIOGRAPHY` do `.synp`. Todo registro nascia com E001.
+2. **O E001 traz "chaves similares", e o laço de correção as repassava ao
+   modelo.** 47 de 47 trocas foram exatamente a 1ª sugestão. A chave trocada era
+   válida no projeto, então o registro compilava e era marcado OK.
+3. **Os avisos iam ao modelo junto com os erros.** O validador não recebe a
+   ontologia, então **todo** código gera UndefinedCode, até os que existem. O
+   modelo apagava as chains "para evitar erros": 269 de 347 ITEMs ficaram sem
+   chain.
+
+Correções:
+
+- **Checagem prévia de chaves** (`assert_input_keys_in_project`): antes de
+  criar a saída ou o cliente LLM, toda chave do `--input` precisa existir na
+  bibliografia do projeto. Senão a campanha aborta, lista as chaves que faltam e
+  diz como incluir o arquivo. Custo zero; a rodada da Kely teria parado em 1 s.
+- **Guarda de identidade** (`block_assembler.foreign_bibrefs`), nos modos
+  `abstract` e `dataset`: saída com `SOURCE`/`ITEM` de chave diferente da pedida
+  é rejeitada com motivo explícito, sem passar pelo modelo.
+- **O E001 nunca vai ao modelo** nos laços de anotação: a chave é dada pela
+  campanha, não gerada. O registro falha na hora, com cabeçalho próprio.
+- **Só erros vão ao modelo de correção**, nos 4 laços de `validator.py`. Os
+  avisos continuam no log, no `--debug` e no bloco de falha que o pesquisador lê.
+
+### Added — várias bibliografias e datasets no projeto
+
+- **Todos os `.bib` declarados passam a valer.** O coder expandia o curinga de
+  `INCLUDE BIBLIOGRAPHY`, mas cada arquivo sobrescrevia o anterior e só o último
+  ficava. Com o `synesis` 0.13, as chaves repetidas entre arquivos viram E089.
+  - Com `synesis` >= 0.13, também valem pastas (`INCLUDE BIBLIOGRAPHY
+    "Sources"`), e os arquivos vão separados ao compilador.
+  - Com a 0.12, os arquivos são concatenados; o coder detecta a versão.
+  - `ctx["bib_contents"]` guarda cada arquivo; `ctx["bib_content"]` continua
+    sendo o texto concatenado.
+  - Toda chamada a `synesis.load()` usa o helper `bibliography_kwargs(ctx)`.
+- **Todas as linhas `INCLUDE DATASET` passam a valer**, pela regra do
+  compilador: arquivo, curinga ou pasta, restritos ao projeto. Antes só a
+  primeira contava, e o caminho podia ser absoluto (o `synesis compile`
+  recusava). Chave repetida entre arquivos aborta. O `--dataset` mantém o
+  comportamento anterior.
+
+---
+
 ## [0.11.0] — 2026-09-14
 
 Uma campanha em lote deixava de dar sinal de vida enquanto rodava. O

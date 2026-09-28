@@ -24,6 +24,7 @@ from typing import Optional
 
 import synesis
 
+from synesis_coder.project_loader import bibliography_kwargs
 from synesis_coder.synr_io import (
     _END_ITEM,
     _ITEM_START,
@@ -269,7 +270,7 @@ def _validate_item_block(item_block: str, ctx: dict) -> bool:
             project_content=ctx["project_content"],
             template_content=ctx["template_content"],
             annotation_contents={"incorporate_test.syn": item_block},
-            bibliography_content=ctx.get("bib_content"),
+            **bibliography_kwargs(ctx),
         )
         return not _has_structural_errors(result)
     except Exception as exc:

@@ -48,7 +48,7 @@ from synesis_coder.block_assembler import assemble_items, assemble_source
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.progress import BatchProgress
-from synesis_coder.project_loader import assert_bibref_known, load_project
+from synesis_coder.project_loader import assert_bibref_known, bibliography_kwargs, load_project
 from synesis_coder.prompt_builder import (
     build_document_prompt,
     build_document_source_values_prompt,
@@ -889,6 +889,7 @@ async def _process_document_async(
     total_fail = 0
 
     progress = BatchProgress(total_chunks, unit="chunk", usage=llm_client.usage)
+    progress.start()
     for coro in asyncio.as_completed(tasks):
         idx, item_blocks, success = await coro
         results_by_index[idx] = item_blocks
@@ -936,7 +937,7 @@ async def _process_document_async(
             project_content=ctx["project_content"],
             template_content=ctx["template_content"],
             annotation_contents={output_path.name: final_output},
-            bibliography_content=ctx.get("bib_content"),
+            **bibliography_kwargs(ctx),
         )
         has_errors = _has_structural_errors(validation)
         if has_errors:

@@ -187,3 +187,68 @@ class TestModesUseCritiqueConnection:
         assert "get_critique_connection()" in src
         # gerador não deve receber a conexão de crítica
         assert "refine_client = LLMClient(model=refine_model)" in src
+
+
+# ---------------------------------------------------------------------------
+# Desativação do raciocínio interno — a forma depende do MODELO
+# ---------------------------------------------------------------------------
+
+
+class TestThinkingOffParams:
+    """Cada família expõe uma chave própria, e a errada falha em silêncio.
+
+    Medido contra Ollama (2026-09-15) com `gemma-4-26B-A4B-it`:
+    sem parâmetro o modelo raciocina (~92% do output); com `think: false` a
+    resposta vem VAZIA consumindo todo o max_tokens; só
+    `chat_template_kwargs.enable_thinking` produz saída limpa.
+    """
+
+    def test_qwen3_uses_think_flag(self):
+        from synesis_coder.llm_client import _thinking_off_params
+
+        assert _thinking_off_params("qwen3:27b") == {"think": False}
+        # o ID real do HF traz a versão no meio: qwen3.8 contém "qwen3"
+        raw = "hf.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:Qwen3.8-27B-IQ3_S"
+        assert _thinking_off_params(raw) == {"think": False}
+
+    def test_kimi_uses_think_flag(self):
+        from synesis_coder.llm_client import _thinking_off_params
+
+        assert _thinking_off_params("moonshot/kimi-k2") == {"think": False}
+
+    def test_gemma_uses_chat_template_kwargs(self):
+        from synesis_coder.llm_client import _thinking_off_params
+
+        params = _thinking_off_params(
+            "hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_XL"
+        )
+        assert params == {"chat_template_kwargs": {"enable_thinking": False}}
+
+    def test_gemma_never_receives_the_think_flag(self):
+        """`think: false` num Gemma devolve conteúdo vazio — regressão cara."""
+        from synesis_coder.llm_client import _thinking_off_params
+
+        assert "think" not in _thinking_off_params("gemma-4-26b-a4b-it")
+
+    def test_unknown_model_gets_no_parameter(self):
+        # Enviar chave desconhecida é pior que não enviar: o backend pode
+        # aceitá-la e quebrar a saída.
+        from synesis_coder.llm_client import _thinking_off_params
+
+        assert _thinking_off_params("claude-sonnet-5") == {}
+        assert _thinking_off_params("gpt-5.6-luna") == {}
+        assert _thinking_off_params("") == {}
+        assert _thinking_off_params(None) == {}
+
+    def test_banner_agrees_with_what_is_sent(self):
+        """O banner não pode anunciar o que o cliente não envia."""
+        from synesis_coder.llm_client import _thinking_off_params
+        from synesis_coder.runtime_info import _thinking_disabled
+
+        class _C:
+            def __init__(self, model):
+                self.model = model
+
+        for model in ("qwen3:27b", "gemma-4-26b-it", "claude-sonnet-5", "gpt-4"):
+            esperado = bool(_thinking_off_params(model))
+            assert _thinking_disabled(_C(model)) is esperado, model

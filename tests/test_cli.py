@@ -91,6 +91,47 @@ class TestPromptOnlyContract:
             result = _run(cmd, "--help")
             assert opt in result.output, cmd
 
+    def test_concurrent_precedence_flag_env_default(self, monkeypatch):
+        """Flag vence env, env vence default — o que se digita descreve ESTA
+        execução; o .env descreve o ambiente habitual."""
+        from synesis_coder.cli import get_concurrent
+
+        monkeypatch.delenv("SYNESIS_CODER_CONCURRENT", raising=False)
+        assert get_concurrent(5) == 5                      # só o default
+        assert get_concurrent(5, flag=2) == 2              # flag sem env
+
+        monkeypatch.setenv("SYNESIS_CODER_CONCURRENT", "1")
+        assert get_concurrent(5) == 1                      # env vence default
+        assert get_concurrent(5, flag=3) == 3              # flag vence env
+
+    def test_concurrent_env_rejects_invalid_values(self, monkeypatch):
+        # Configuração inválida não pode derrubar a campanha nem virar 0
+        # (que travaria o semáforo): cai no default do comando.
+        from synesis_coder.cli import get_concurrent
+
+        for bad in ("abc", "", "0", "-2", "  "):
+            monkeypatch.setenv("SYNESIS_CODER_CONCURRENT", bad)
+            assert get_concurrent(5) == 5, bad
+
+    def test_batch_modes_default_output_to_current_directory(self):
+        """Sem --output-dir, o destino é o diretório atual — não um erro.
+
+        Exigir a flag interrompia o comando mais curto, que é justamente o da
+        primeira tentativa de quem experimenta o modo.
+        """
+        for cmd in ("abstract", "dataset"):
+            result = _run(cmd, "--help")
+            assert result.exit_code == 0, cmd
+            # O Click quebra a linha do help; comparar sem espaços em branco.
+            flat = " ".join(result.output.split())
+            assert "Default: current directory." in flat, cmd
+
+    def test_abstract_without_output_dir_does_not_raise_usage_error(self, tmp_path):
+        # Falha adiante (projeto inexistente), mas NÃO por falta de --output-dir.
+        result = _run("abstract", "--project", str(tmp_path / "nao_existe.synp"),
+                      "--input", str(tmp_path / "nao_existe.bib"))
+        assert "Missing option '--output-dir'" not in result.output
+
     def test_emit_prompt_default_name_derives_from_project_and_mode(self, tmp_path):
         from synesis_coder.cli import _emit_prompt
 

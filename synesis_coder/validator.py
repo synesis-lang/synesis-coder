@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Tuple
 
 import synesis
 
+from synesis_coder.project_loader import bibliography_kwargs
+
 if TYPE_CHECKING:
     from synesis_coder.debug_log import DebugRecorder
     from synesis_coder.llm_client import LLMClient
@@ -171,7 +173,7 @@ def validate_and_fix(
                 project_content=ctx["project_content"],
                 template_content=ctx["template_content"],
                 annotation_contents={annotation_key: output},
-                bibliography_content=ctx.get("bib_content"),
+                **bibliography_kwargs(ctx),
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
@@ -197,20 +199,24 @@ def validate_and_fix(
         if not _has_structural_errors(result):
             return output, True
 
-        # Falhou — obter diagnósticos
+        # Falhou — diagnóstico completo (com avisos) para o registro de falha
         last_errors = result.get_diagnostics()
+
+        # E001 não é corrigível pelo modelo: a chave é dada, não gerada.
+        if _unfixable_bibref_errors(result):
+            return _failure_output(output, last_errors, max_tries, bibref=True), False
 
         # Última tentativa esgotada
         if attempt >= max_tries:
             break
 
-        # Solicitar correção com temperature escalada
+        # Solicitar correção com temperature escalada — só ERROS vão ao modelo
         temperature = CORRECTION_TEMPERATURES[
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
         raw = _strip_markdown_fences(
             llm_client.fix(
-                output, last_errors, temperature=temperature, system=fix_system,
+                output, _fix_diagnostics(result), temperature=temperature, system=fix_system,
             )
         )
         candidate = _extract_item_blocks(raw) or raw
@@ -219,12 +225,7 @@ def validate_and_fix(
             _log.warning(_FIX_REJECTED_MSG)
 
     # Todas as tentativas falharam
-    error_header = (
-        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
-        f"# Último diagnóstico:\n"
-    )
-    commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
-    return error_header + commented_errors + "\n\n" + output, False
+    return _failure_output(output, last_errors, max_tries), False
 
 
 async def validate_and_fix_async(
@@ -269,7 +270,7 @@ async def validate_and_fix_async(
                 project_content=ctx["project_content"],
                 template_content=ctx["template_content"],
                 annotation_contents={annotation_key: output},
-                bibliography_content=ctx.get("bib_content"),
+                **bibliography_kwargs(ctx),
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
@@ -313,15 +314,20 @@ async def validate_and_fix_async(
                 context=context,
             )
 
+        # E001 não é corrigível pelo modelo: a chave é dada, não gerada.
+        if _unfixable_bibref_errors(result):
+            return _failure_output(output, last_errors, max_tries, bibref=True), False
+
         if attempt >= max_tries:
             break
 
+        # Só ERROS vão ao modelo de correção (ver _fix_diagnostics)
         temperature = CORRECTION_TEMPERATURES[
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
         raw = _strip_markdown_fences(
             await llm_client.fix_async(
-                output, last_errors, temperature=temperature, context=context,
+                output, _fix_diagnostics(result), temperature=temperature, context=context,
                 system=fix_system,
             )
         )
@@ -330,12 +336,57 @@ async def validate_and_fix_async(
         if not accepted:
             _log.warning(_FIX_REJECTED_MSG)
 
-    error_header = (
-        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
-        f"# Último diagnóstico:\n"
-    )
-    commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
-    return error_header + commented_errors + "\n\n" + output, False
+    return _failure_output(output, last_errors, max_tries), False
+
+
+def _fix_diagnostics(result) -> str:
+    """Diagnóstico enviado ao modelo de correção: só os ERROS, formato detalhado.
+
+    Avisos nunca vão ao modelo. O validador de anotações não recebe a ontologia,
+    então todo código gera UndefinedCode — inclusive os que existem no .syno.
+    Na rodada da Kely (face85, 2026-09-28) o modelo leu esses avisos como erros
+    e apagou as chains "para evitar erros de validação": 269 de 347 ITEMs
+    ficaram sem chain. Avisos continuam no log, no --debug e no bloco de falha.
+    """
+    lines = ["=== ERROS ==="]
+    for err in result.validation_result.errors:
+        lines.append(err.to_diagnostic())
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _unfixable_bibref_errors(result) -> list:
+    """E001 (referência fora da bibliografia) na saída de um laço de anotação.
+
+    A chave do registro é dada pela campanha (--input/--bibref), não gerada. Um
+    E001 aqui significa configuração errada ou modelo trocando a chave — e o
+    diagnóstico traz "chaves similares", que o modelo adota: na rodada da Kely,
+    47 de 47 trocas foram exatamente a 1ª sugestão, e os registros passaram como
+    OK atribuídos a outros artigos. Por isso o E001 nunca vai ao modelo.
+    """
+    try:
+        from synesis.ast.results import UnregisteredSource
+    except ImportError:  # pragma: no cover - compilador sem a classe
+        return []
+    return [e for e in result.validation_result.errors if isinstance(e, UnregisteredSource)]
+
+
+def _failure_output(output: str, diagnostics: str, max_tries: int, *, bibref: bool = False) -> str:
+    """Saída comentada de um registro que não validou."""
+    if bibref:
+        header = (
+            "# ERRO: referência fora da bibliografia do projeto — não corrigível pelo modelo.\n"
+            "# A chave do registro é dada pela campanha; trocá-la atribuiria o texto a outra\n"
+            "# fonte. Verifique o INCLUDE BIBLIOGRAPHY do .synp.\n"
+            "# Diagnóstico:\n"
+        )
+    else:
+        header = (
+            f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
+            f"# Último diagnóstico:\n"
+        )
+    commented = "\n".join(f"# {line}" for line in diagnostics.splitlines())
+    return header + commented + "\n\n" + output
 
 
 def _has_structural_errors(result) -> bool:
@@ -440,7 +491,7 @@ def validate_ontology_entry(
                 template_content=ctx["template_content"],
                 annotation_contents=ctx.get("annotation_contents") or None,
                 ontology_contents={ontology_key: output},
-                bibliography_content=ctx.get("bib_content"),
+                **bibliography_kwargs(ctx),
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
@@ -474,7 +525,7 @@ def validate_ontology_entry(
         ]
         raw = _strip_markdown_fences(
             llm_client.fix(
-                output, last_errors, temperature=temperature, system=fix_system,
+                output, _fix_diagnostics(result), temperature=temperature, system=fix_system,
             )
         )
         candidate = _extract_ontology_blocks(raw) or raw
@@ -512,7 +563,7 @@ async def validate_ontology_entry_async(
                 template_content=ctx["template_content"],
                 annotation_contents=ctx.get("annotation_contents") or None,
                 ontology_contents={ontology_key: output},
-                bibliography_content=ctx.get("bib_content"),
+                **bibliography_kwargs(ctx),
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
@@ -546,7 +597,7 @@ async def validate_ontology_entry_async(
         ]
         raw = _strip_markdown_fences(
             await llm_client.fix_async(
-                output, last_errors, temperature=temperature, system=fix_system,
+                output, _fix_diagnostics(result), temperature=temperature, system=fix_system,
             )
         )
         candidate = _extract_ontology_blocks(raw) or raw

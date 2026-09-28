@@ -31,11 +31,12 @@ from synesis_coder.block_assembler import (
     assemble_source,
     count_item_blocks,
     dedupe_item_blocks,
+    foreign_bibrefs,
 )
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.progress import BatchProgress
-from synesis_coder.project_loader import load_project
+from synesis_coder.project_loader import assert_input_keys_in_project, load_project
 from synesis_coder.prompt_builder import build_abstract_prompt, build_abstract_values_prompt
 from synesis_coder.runtime_info import (
     campaign_summary,
@@ -489,6 +490,22 @@ async def _process_one_abstract(
                 "loop degenerativo do modelo.", bibref, dupes,
             )
 
+        # Identidade: todo SOURCE/ITEM precisa carregar a chave pedida. Validar não
+        # basta — uma chave trocada por OUTRA chave válida do projeto compila, e
+        # o texto fica atribuído ao artigo errado (rodada da Kely: 47 de 65).
+        foreign = foreign_bibrefs(final_syn, bibref)
+        if foreign:
+            success = False
+            logger.error(
+                "%s: a saída usa outra(s) chave(s) (%s) — registro rejeitado.",
+                bibref, ", ".join(sorted(foreign)),
+            )
+            final_syn = (
+                f"# ERRO: a saída usa a(s) chave(s) {', '.join('@' + k for k in sorted(foreign))}"
+                f" no lugar de @{bibref}; o texto seria atribuído a outra fonte.\n"
+                + final_syn
+            )
+
         # Cobertura: a validação garante SINTAXE, não que algo foi anotado.
         if success and count_item_blocks(final_syn) == 0:
             success = False
@@ -754,6 +771,14 @@ async def _process_abstract_async(
     total_in_corpus = len(entries)
     skipped_resume = 0
 
+    # 1b. Carga inicial do projeto + checagem prévia das chaves, ANTES de criar
+    # a saída ou o cliente LLM. Se o projeto não compila, é erro de configuração
+    # e aborta (o try dentro do loop protege só contra .syn malformados surgidos
+    # DURANTE a campanha). Se as chaves do --input não estão na bibliografia do
+    # projeto, todo registro nasceria com E001 — aborta sem gastar chamada.
+    ctx = load_project(project_path, load_annotations=True)
+    assert_input_keys_in_project(ctx, [e["bibref"] for e in entries], bib_path.name)
+
     # 2. Criar diretório de saída
     output_dir = Path(output_dir).resolve()
     if output_dir.exists() and not output_dir.is_dir():
@@ -823,14 +848,10 @@ async def _process_abstract_async(
     start_time = time.monotonic()
 
     batch_progress = BatchProgress(total, unit="ref", usage=llm_client.usage)
+    batch_progress.start()
 
     def _progress(bibref: str, success: bool) -> None:
         batch_progress.mark(success=success, detail=bibref)
-
-    # Carga inicial fora do loop: se o projeto não compila ANTES de começar, é
-    # erro de configuração e deve abortar. O try dentro do loop protege apenas
-    # contra .syn malformados surgidos DURANTE a campanha.
-    ctx = load_project(project_path, load_annotations=True)
 
     # Blocos já gravados, acumulados entre batches (modo arquivo único).
     accumulated: List[str] = []

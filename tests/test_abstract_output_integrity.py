@@ -27,7 +27,7 @@ from synesis_coder.modes.abstract_mode import (
     _placeholder_value,
     is_failed_output,
 )
-from synesis_coder.project_loader import load_project
+from synesis_coder.project_loader import bibliography_kwargs, load_project
 
 CASES_DIR = Path("d:/GitHub/case-studies")
 FACE85 = CASES_DIR / "ufmg/face85"
@@ -45,9 +45,9 @@ def _compile(annotations: dict):
         project_content=PROJECT_FACE85.read_text(encoding="utf-8"),
         template_content=(FACE85 / "face85.synt").read_text(encoding="utf-8"),
         annotation_contents=annotations,
-        bibliography_content=(
-            FACE85 / "face85_selecionados.bib"
-        ).read_text(encoding="utf-8"),
+        # A bibliografia vem do INCLUDE BIBLIOGRAPHY do projeto (pasta Sources/
+        # desde 2026-09-28), não de um caminho fixo que muda com a organização.
+        **bibliography_kwargs(_face85_ctx()),
     )
 
 
@@ -138,7 +138,7 @@ class TestFailureBlock:
         ctx = _face85_ctx()
         blk = _build_failure_block(ctx, "torga2017", "timeout")
         good = "SOURCE @caliari2017\n    description: d\n" \
-               "    knowledge_area: Administração\n    method: m\nEND SOURCE\n"
+               "    knowledge_area: Administração_de_Empresas\n    method: m\nEND SOURCE\n"
         result = _compile({"ok.syn": good, "bad.syn": blk})
         assert len(result.validation_result.errors) == 0
 

@@ -577,6 +577,7 @@ async def _process_normalize_async(
 
         # Wrapper de progresso: ver nota equivalente em critique_mode.
         progress = BatchProgress(len(chunks), unit="lote", usage=llm_client.usage)
+        progress.start()
 
         async def _tracked(chunk):
             result = await _process_chunk(chunk)

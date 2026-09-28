@@ -254,13 +254,14 @@ def engine_warnings(facts, *, concurrent: Optional[int] = None) -> list[str]:
     """
     warnings = []
 
-    if facts.context_underused:
+    if facts.context_at_vendor_default:
         warnings.append(
-            f"O servidor está entregando {_thousands(facts.context_served)} "
-            f"tokens de contexto, mas o modelo comporta "
-            f"{_thousands(facts.context_window)}. Prompts longos vão falhar ou "
-            f"truncar sem necessidade — defina OLLAMA_CONTEXT_LENGTH no "
-            f"servidor e reinicie o serviço."
+            f"O servidor está servindo {_thousands(facts.context_served)} tokens "
+            f"de contexto — o default de fábrica, provavelmente não configurado. "
+            f"Os prompts deste coder passam de 7.000 tokens só de template, "
+            f"então as chamadas tendem a falhar. Defina OLLAMA_CONTEXT_LENGTH "
+            f"no servidor com o maior valor que a VRAM comportar (o KV cache "
+            f"cresce com o contexto e disputa memória com os pesos do modelo)."
         )
 
     if facts.is_local and concurrent is not None and concurrent > 1:
@@ -414,15 +415,19 @@ def runtime_banner(
 
 
 def _thinking_disabled(llm_client) -> bool:
-    """True quando o coder desativa o raciocínio interno deste modelo.
+    """True quando o coder consegue desativar o raciocínio deste modelo.
 
-    Só Qwen3 e Kimi aceitam o flag; nos demais a informação não se aplica e
-    não deve aparecer no banner. Espelha a condição de `llm_client`.
+    Lê do próprio `llm_client` quais famílias expõem controle, em vez de
+    repetir a lista: duplicá-la faria o banner divergir do que é de fato
+    enviado — anunciando "raciocínio desativado" onde o modelo continua
+    pensando, ou omitindo onde está desativado.
     """
+    from synesis_coder.llm_client import _thinking_off_params
+
     model = getattr(llm_client, "model", "") or ""
     if not isinstance(model, str):
         return False
-    return any(m in model.lower() for m in ("qwen3", "kimi"))
+    return bool(_thinking_off_params(model))
 
 
 def print_product_header(quiet: int = 0) -> None:

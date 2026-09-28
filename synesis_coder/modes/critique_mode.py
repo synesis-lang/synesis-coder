@@ -657,6 +657,7 @@ async def _process_critique_async(
     # notificação tem de partir de dentro de cada tarefa. Envolver preserva a
     # assinatura de _critique_single_item e a ordem do gather.
     progress = BatchProgress(len(tasks), unit="item", usage=llm_client.usage)
+    progress.start()
 
     async def _tracked(task):
         result = await task

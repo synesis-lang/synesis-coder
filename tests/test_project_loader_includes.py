@@ -124,4 +124,4 @@ class TestCombinedDirectives:
 
         assert len(ann) == 2
         assert len(onto) == 1
-        assert bib is not None and "@Article" in bib
+        assert list(bib) == ["refs.bib"] and "@Article" in bib["refs.bib"]

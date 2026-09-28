@@ -414,6 +414,7 @@ async def _process_ontology_async(
     rejected: List[Tuple[str, str]] = []  # (code, syno_output) — falharam validação
 
     progress = BatchProgress(total, unit="cód", usage=llm_client.usage)
+    progress.start()
     for coro in asyncio.as_completed(tasks):
         code, syno_output, success = await coro
         if success:

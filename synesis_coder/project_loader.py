@@ -15,7 +15,50 @@ from typing import Any, Dict, List, Optional, Tuple
 import synesis
 from synesis.ast.nodes import FieldType, Scope
 
+try:  # synesis >= 0.13: INCLUDE com arquivo, curinga ou pasta
+    from synesis.parser.paths import INCLUDE_EXTENSIONS as _INCLUDE_EXTENSIONS
+    from synesis.parser.paths import expand_include as _expand_include
+except ImportError:  # synesis 0.12: só arquivo e curinga
+    _expand_include = None
+    _INCLUDE_EXTENSIONS = {}
+
 logger = logging.getLogger(__name__)
+
+
+def _load_accepts_bibliography_contents() -> bool:
+    import inspect
+
+    return "bibliography_contents" in inspect.signature(synesis.load).parameters
+
+
+# synesis >= 0.13 recebe vários .bib separados e acusa chave repetida entre eles
+# (E089); a 0.12 recebe um texto só. Detectado uma vez, para o coder funcionar
+# com as duas enquanto a 0.13 não está publicada.
+_LOAD_TAKES_BIB_DICT = _load_accepts_bibliography_contents()
+
+# Separador entre .bib concatenados (entradas BibTeX não atravessam arquivos).
+_BIB_SEPARATOR = "\n\n"
+
+
+def _bibliography_kwargs(bib_contents: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """Argumento de bibliografia para synesis.load(), conforme a versão instalada."""
+    if not bib_contents:
+        return {"bibliography_content": None}
+    if _LOAD_TAKES_BIB_DICT:
+        return {"bibliography_contents": dict(bib_contents)}
+    return {"bibliography_content": _BIB_SEPARATOR.join(bib_contents.values())}
+
+
+def bibliography_kwargs(ctx: dict) -> Dict[str, Any]:
+    """Argumento de bibliografia de um ctx para as chamadas a synesis.load().
+
+    Use sempre este helper em vez de `bibliography_content=ctx["bib_content"]`:
+    com vários .bib, só ele preserva a separação por arquivo (E089).
+    """
+    contents = ctx.get("bib_contents")
+    if contents is None and ctx.get("bib_content"):
+        contents = {"<bibliography>": ctx["bib_content"]}
+    return _bibliography_kwargs(contents)
 
 
 def load_project(
@@ -65,7 +108,8 @@ def load_project(
             "project_description" — Optional[str]: descrição do .synp
             "project_content"     — str
             "template_content"    — str
-            "bib_content"         — Optional[str]
+            "bib_content"         — Optional[str]: todos os .bib concatenados
+            "bib_contents"        — Dict[str, str]: cada .bib separado
             "project_path"        — Path
 
     Raises:
@@ -88,9 +132,14 @@ def load_project(
     # Coletar includes — .bib sempre carregado (necessário para validação)
     annotation_contents: Dict[str, str] = {}
     ontology_contents: Dict[str, str] = {}
-    bib_content: Optional[str] = None
 
-    _ann, _all_ontology, bib_content = _collect_includes(project_content, base_dir)
+    _ann, _all_ontology, bib_contents = _collect_includes(project_content, base_dir)
+    # Texto único, na ordem do .synp, para quem procura uma entrada por regex
+    # (critique_mode, anchor_check). O compilador recebe os arquivos separados
+    # (bibliography_kwargs), para acusar chave repetida entre eles (E089).
+    bib_content: Optional[str] = (
+        _BIB_SEPARATOR.join(bib_contents.values()) if bib_contents else None
+    )
     if load_annotations:
         annotation_contents = _ann
     if load_ontology:
@@ -114,8 +163,8 @@ def load_project(
         template_content=template_content,
         annotation_contents=annotation_contents or None,
         ontology_contents=ontology_contents or None,
-        bibliography_content=bib_content,
         dataset_index=dataset_index,
+        **_bibliography_kwargs(bib_contents),
         project_filename=project_path.name,
         template_filename=template_path.name,
     )
@@ -211,6 +260,7 @@ def load_project(
         "project_content": project_content,
         "template_content": template_content,
         "bib_content": bib_content,
+        "bib_contents": bib_contents,  # {rótulo: conteúdo} de cada .bib
         "dataset_index": dataset_index,  # registros TOML (ON DATASET); None se ausente
         "annotation_contents": annotation_contents,  # para validação de ITEMs isolados
         "project_path": project_path,
@@ -289,6 +339,42 @@ def assert_bibref_known(ctx: dict, bibref: str) -> None:
     raise ValueError("\n".join(lines))
 
 
+def assert_input_keys_in_project(ctx: dict, keys: List[str], input_name: str) -> None:
+    """Checagem prévia de campanha: toda chave do --input precisa existir no projeto.
+
+    O validador confere cada saída contra a bibliografia DO PROJETO (INCLUDE
+    BIBLIOGRAPHY), não contra o --input. Se as chaves do lote não estão lá, todo
+    registro começa com E001 — e, na rodada da Kely (face85, 2026-09-28), o
+    laço de correção trocou 47 das 65 chaves pela sugestão do E001 e as marcou
+    OK. Aqui a campanha aborta antes da primeira chamada, sem custo.
+
+    Projeto sem INCLUDE BIBLIOGRAPHY não valida bibref: nada a checar.
+
+    Raises:
+        ValueError: listando as chaves ausentes e como incluir o arquivo.
+    """
+    import re
+
+    project_content = ctx.get("project_content", "")
+    if not re.search(r"INCLUDE\s+BIBLIOGRAPHY\s+\"", project_content, re.IGNORECASE):
+        return
+    known = {k.lower() for k in ctx.get("bib_keys", [])}
+    missing = [k for k in keys if k.lstrip("@").strip().lower() not in known]
+    if not missing:
+        return
+    sample = ", ".join(missing[:10])
+    if len(missing) > 10:
+        sample += f", … (+{len(missing) - 10})"
+    raise ValueError(
+        f"{len(missing)} de {len(keys)} referência(s) de '{input_name}' não estão na "
+        f"bibliografia do projeto: {sample}.\n"
+        "O coder valida cada saída contra o INCLUDE BIBLIOGRAPHY do .synp, não contra "
+        "o --input. Inclua o arquivo no projeto — por exemplo "
+        'INCLUDE BIBLIOGRAPHY "Sources" (a pasta inteira, synesis >= 0.13) — e rode de novo.\n'
+        "Nenhuma chamada ao modelo foi feita."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Funções auxiliares (privadas)
 # ---------------------------------------------------------------------------
@@ -306,10 +392,13 @@ def _resolve_template_path(project_content: str, base_dir: Path) -> Path:
 
 def _collect_includes(
     project_content: str, base_dir: Path
-) -> Tuple[Dict[str, str], Dict[str, str], Optional[str]]:
+) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
     """Lê arquivos referenciados nas diretivas INCLUDE do .synp.
 
-    Retorna (annotation_contents, ontology_contents, bib_content).
+    Retorna (annotation_contents, ontology_contents, bib_contents). Os três são
+    dicts `{rótulo: conteúdo}` na ordem do .synp: várias linhas INCLUDE, curingas
+    e pastas se somam — inclusive a bibliografia, que antes guardava só o ÚLTIMO
+    arquivo (cada .bib sobrescrevia o anterior).
 
     Delega a resolução de caminhos aos utilitários do compilador
     (`synesis.parser.paths`) em vez de reimplementá-la, de modo que as três
@@ -334,7 +423,7 @@ def _collect_includes(
 
     annotation_contents: Dict[str, str] = {}
     ontology_contents: Dict[str, str] = {}
-    bib_content: Optional[str] = None
+    bib_contents: Dict[str, str] = {}
 
     # `SHARED` é opcional e não-capturante: só ONTOLOGY o aceita na gramática,
     # mas tolerá-lo aqui para os três tipos mantém a regex simples sem risco
@@ -349,7 +438,13 @@ def _collect_includes(
         include_type = match.group(2).upper()
         raw = match.group(3)
 
-        if has_glob(raw):
+        if _expand_include is not None:
+            # synesis >= 0.13: arquivo, curinga OU pasta, pela regra do compilador
+            # (mesma ordem, mesma contenção ao projeto).
+            paths = list(_expand_include(
+                base_dir, raw, _INCLUDE_EXTENSIONS.get(include_type), shared=is_shared,
+            ).files)
+        elif has_glob(raw):
             paths, _outside = resolve_glob(base_dir, raw)
         else:
             resolution = resolve_include(base_dir, raw, shared=is_shared)
@@ -374,9 +469,9 @@ def _collect_includes(
             elif include_type == "ONTOLOGY":
                 ontology_contents[key] = content
             elif include_type == "BIBLIOGRAPHY":
-                bib_content = content
+                bib_contents.setdefault(key, content)
 
-    return annotation_contents, ontology_contents, bib_content
+    return annotation_contents, ontology_contents, bib_contents
 
 
 def _dataset_key_path(template) -> Optional[str]:
@@ -424,18 +519,37 @@ def _load_dataset(
     """
     import re
 
-    from synesis.parser.dataset_loader import load_dataset
+    from synesis.parser.dataset_loader import SOURCE_FILE_KEY, load_dataset
 
-    match = re.search(
+    declared = re.findall(
         r'INCLUDE\s+DATASET\s+"([^"]+)"', project_content, re.IGNORECASE
     )
-    if not match:
+    if not declared:
         return None
     key_path = _dataset_key_path(template)
     if key_path is None:
         return None
-    glob = glob_override if glob_override is not None else match.group(1)
-    return load_dataset(glob, key_path=key_path, base_dir=base_dir)
+    if glob_override is not None or _expand_include is None:
+        # Override pontual (--dataset) ou synesis 0.12: o comportamento anterior.
+        glob = glob_override if glob_override is not None else declared[0]
+        return load_dataset(glob, key_path=key_path, base_dir=base_dir)
+
+    # Todas as linhas INCLUDE DATASET, pela regra do compilador: arquivo,
+    # curinga ou pasta, restritos ao projeto — assim o coder aceita exatamente o
+    # dataset que `synesis compile` aceita. Chave repetida entre arquivos aborta
+    # (o compilador reporta E089): decidir o registro certo cabe ao pesquisador.
+    index: Dict[str, Any] = {}
+    for raw in declared:
+        for path in _expand_include(base_dir, raw, _INCLUDE_EXTENSIONS.get("DATASET")).files:
+            for key, record in load_dataset(path, key_path=key_path, base_dir=base_dir).items():
+                if key in index:
+                    raise ValueError(
+                        f"Chave de dataset '{key}' repetida em "
+                        f"'{index[key].get(SOURCE_FILE_KEY)}' e '{path}'. "
+                        "Cada registro precisa de uma chave única no projeto."
+                    )
+                index[key] = record
+    return index
 
 
 def _build_code_index(linked) -> dict:

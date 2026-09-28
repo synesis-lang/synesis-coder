@@ -466,6 +466,7 @@ async def _process_refine_async(
     ]
     # Wrapper de progresso: ver nota equivalente em critique_mode.
     progress = BatchProgress(len(tasks), unit="item", usage=refine_client.usage)
+    progress.start()
 
     async def _tracked(task):
         result = await task

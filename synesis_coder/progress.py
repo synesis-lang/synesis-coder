@@ -129,6 +129,21 @@ class BatchProgress:
         self._last_emit = self._start
         self._lock = threading.Lock()
 
+    def start(self) -> None:
+        """Anuncia o início, antes de qualquer unidade concluir.
+
+        Sem isto a primeira linha só aparece quando a primeira unidade termina
+        — o que num backend lento pode levar dezenas de minutos, e o terminal
+        fica indistinguível de um processo travado. A campanha precisa dizer
+        que começou, não apenas que avançou.
+        """
+        if self.total <= 0:
+            return
+        label = f"{self.label} " if self.label else ""
+        logger.info(
+            "%sIniciando: %d %s a processar…", label, self.total, self.unit,
+        )
+
     def mark(self, success: bool = True, detail: Optional[str] = None) -> None:
         """Registra uma unidade concluída e emite a linha se for hora.
 

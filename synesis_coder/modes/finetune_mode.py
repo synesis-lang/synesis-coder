@@ -471,6 +471,7 @@ async def _process_finetune_async(
 
         total_new = 0
         progress = BatchProgress(total_to_process, unit="par", usage=llm_client.usage)
+        progress.start()
 
         for coro in asyncio.as_completed(tasks):
             new_pairs, counts = await coro

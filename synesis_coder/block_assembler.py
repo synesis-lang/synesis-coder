@@ -322,6 +322,22 @@ def count_item_blocks(text: str) -> int:
     return len(_ITEM_BLOCK.findall(text))
 
 
+_BLOCK_BIBREF = re.compile(r"^[ \t]*(?:SOURCE|ITEM)[ \t]+@([^\s#]+)", re.MULTILINE)
+
+
+def foreign_bibrefs(text: str, expected: str) -> set[str]:
+    """Chaves de SOURCE/ITEM no texto que diferem da chave pedida.
+
+    Guarda de identidade dos modos de lote: a validação aceita qualquer chave
+    que exista no projeto, então uma chave TROCADA por outra válida compila e
+    atribui o texto à fonte errada (rodada da Kely, face85: 47 de 65). A
+    comparação ignora caixa, como o compilador faz com as chaves do .bib; linhas
+    comentadas (`# SOURCE @x`, dos diagnósticos) não contam.
+    """
+    wanted = expected.lstrip("@").strip().lower()
+    return {key for key in _BLOCK_BIBREF.findall(text) if key.lower() != wanted}
+
+
 def normalize_indentation(text: str) -> str:
     """Reescreve a indentação de um texto Synesis para a forma canônica.
 

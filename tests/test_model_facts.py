@@ -30,6 +30,39 @@ class _Client:
 # ---------------------------------------------------------------------------
 
 
+def test_display_name_comes_from_gguf_metadata_not_the_tag(monkeypatch):
+    # Em GGUF do Hugging Face o que vem depois do ":" é a QUANTIZAÇÃO, não o
+    # modelo: a tag `...gemma-4-26B-A4B-it-GGUF:UD-Q3_K_XL` exibia
+    # "UD-Q3_K_XL" como se fosse o nome.
+    monkeypatch.setenv("SYNESIS_CODER_API_URL", "http://192.168.1.47:11434")
+    show = {
+        "details": {"parameter_size": "25.2B", "quantization_level": "Q3_K_M"},
+        "model_info": {"general.basename": "Gemma-4-26B-A4B-It",
+                       "gemma4.context_length": 262144},
+    }
+
+    def fake(url, **kw):
+        return show if url.endswith("/api/show") else {"models": []}
+
+    with patch.object(mf, "_http_json", side_effect=fake):
+        facts = fetch_model_facts(
+            _Client(model="hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_XL")
+        )
+    assert facts.display_name == "Gemma-4-26B-A4B-It"
+
+
+def test_display_name_falls_back_to_tag_without_metadata(monkeypatch):
+    monkeypatch.setenv("SYNESIS_CODER_API_URL", "http://192.168.1.47:11434")
+    show = {"details": {}, "model_info": {}}
+
+    def fake(url, **kw):
+        return show if url.endswith("/api/show") else {"models": []}
+
+    with patch.object(mf, "_http_json", side_effect=fake):
+        facts = fetch_model_facts(_Client(model="qwen3:27b"))
+    assert facts.display_name == "27b"  # sem metadados, resta a tag
+
+
 def test_short_name_strips_repo_and_tag():
     raw = "hf.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:Qwen3.8-27B-GSQ-RCO-IQ3_S"
     assert short_name(raw) == "Qwen3.8-27B-GSQ-RCO-IQ3_S"
@@ -66,21 +99,34 @@ def test_is_local_host_covers_private_ranges():
 # ---------------------------------------------------------------------------
 
 
-def test_context_underused_detects_the_real_incident():
-    # O caso medido: servidor entregando 4.096 de 262.144 (1,5%).
+def test_detects_the_untouched_vendor_default():
+    # O caso medido: servidor no default de fábrica (4.096), com o modelo
+    # comportando 262.144. Não é dimensionamento, é ausência de configuração.
     f = ModelFacts("m", context_window=262144, context_served=4096)
-    assert f.context_underused
+    assert f.context_at_vendor_default
 
 
-def test_context_underused_false_when_reasonable():
-    f = ModelFacts("m", context_window=262144, context_served=131072)
-    assert not f.context_underused
+def test_any_deliberate_sizing_is_not_flagged():
+    # Quanto contexto cabe depende da VRAM da máquina, que o coder NÃO conhece:
+    # o KV cache cresce com o contexto e disputa memória com os pesos. Julgar
+    # por fração da janela do modelo empurraria o pesquisador para uma
+    # configuração que vaza para a RAM — pior que o silêncio. Só o default
+    # intocado é afirmável sem conhecer o hardware.
+    for served in (8192, 16384, 32768, 131072):
+        f = ModelFacts("m", context_window=262144, context_served=served)
+        assert not f.context_at_vendor_default, f"{served} não deve alertar"
 
 
-def test_context_underused_needs_both_numbers():
-    assert not ModelFacts("m", context_window=262144).context_underused
-    assert not ModelFacts("m", context_served=4096).context_underused
-    assert not ModelFacts("m").context_underused
+def test_vendor_default_needs_both_numbers():
+    assert not ModelFacts("m", context_window=262144).context_at_vendor_default
+    assert not ModelFacts("m", context_served=4096).context_at_vendor_default
+    assert not ModelFacts("m").context_at_vendor_default
+
+
+def test_4096_is_not_flagged_when_it_is_the_model_maximum():
+    # Modelo cuja janela É 4.096: servir isso é o teto, não descuido.
+    f = ModelFacts("m", context_window=4096, context_served=4096)
+    assert not f.context_at_vendor_default
 
 
 def test_is_local_only_when_host_known():

@@ -105,6 +105,42 @@ def _get_max_retries() -> int:
     return int(os.environ.get("SYNESIS_CODER_MAX_RETRIES", "3"))
 
 
+def get_concurrent(default: int) -> int:
+    """Chamadas simultâneas: `SYNESIS_CODER_CONCURRENT` ou o default do modo.
+
+    O valor adequado depende de QUE SERVIDOR atende — a mesma coisa que o
+    `.env` já descreve em BACKEND/API_URL/MODEL. Contra uma API que responde em
+    paralelo, 5 é bom; contra um servidor local de uma GPU, as chamadas apenas
+    disputam a mesma memória. Sem esta variável o pesquisador precisa lembrar
+    de `--concurrent 1` em cada comando, e nada o avisa se esquecer.
+
+    A flag da CLI continua vencendo: ela escreve nesta mesma variável antes da
+    leitura (o padrão já usado por `--max-tokens` e `--temperature`).
+
+    Args:
+        default: Valor do comando quando nada foi configurado — preserva a
+            divergência histórica entre modos (5 em abstract, 3 em document).
+    """
+    raw = os.environ.get("SYNESIS_CODER_CONCURRENT", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning(
+            "SYNESIS_CODER_CONCURRENT=%r não é um número inteiro — usando %d.",
+            raw, default,
+        )
+        return default
+    if value < 1:
+        _log.warning(
+            "SYNESIS_CODER_CONCURRENT=%d é inválido (mínimo 1) — usando %d.",
+            value, default,
+        )
+        return default
+    return value
+
+
 # Modelos compatíveis com extended thinking (Anthropic Claude 4.x)
 _THINKING_CAPABLE_MODELS = frozenset({
     "claude-opus-4-7",
@@ -380,6 +416,32 @@ def _int_attr(obj, name: str) -> int:
         return 0
     value = getattr(obj, name, 0)
     return value if isinstance(value, int) else 0
+
+
+def _thinking_off_params(model: str) -> dict:
+    """Parâmetros que desativam o raciocínio interno deste modelo.
+
+    Cada família usa uma forma própria, e a errada FALHA EM SILÊNCIO — medido
+    contra Ollama 2026-09-15 com `gemma-4-26B-A4B-it`:
+
+    | forma enviada                              | resultado          |
+    |--------------------------------------------|--------------------|
+    | nenhuma                                    | raciocina (~92% do output) |
+    | `think: false`                             | **conteúdo VAZIO**, gasta todo o max_tokens |
+    | `chat_template_kwargs.enable_thinking`     | resposta limpa     |
+
+    Modelos de raciocínio que não expõem chave alguma simplesmente pensam; o
+    coder não tem como impedir e trata isso no orçamento de tokens.
+
+    Returns:
+        Dict para `extra_body`; vazio quando o modelo não expõe controle.
+    """
+    name = model.lower() if isinstance(model, str) else ""
+    if any(m in name for m in ("qwen3", "kimi")):
+        return {"think": False}
+    if "gemma" in name:
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return {}
 
 
 def _model_supports_thinking(model: str) -> bool:
@@ -1041,11 +1103,13 @@ class LLMClient:
         if self.backend == "openai":
             _, api_messages = self._translate_messages(messages)
 
-            # Qwen3 e Kimi (Moonshot) suportam desativar reasoning via extra_body={"think": false}
+            # Desativar o raciocínio interno depende do MODELO — não há
+            # parâmetro comum. Enviar a forma errada não é inócuo: `think:false`
+            # num Gemma devolve conteúdo VAZIO consumindo todo o max_tokens
+            # (medido). Daí o despacho explícito por família.
             extra: dict = {}
-            _model_lower = self.model.lower()
-            if not thinking and any(m in _model_lower for m in ("qwen3", "kimi")):
-                extra["think"] = False
+            if not thinking:
+                extra.update(_thinking_off_params(self.model))
 
             @retry(
                 retry=retry_if_exception_type(retryable),

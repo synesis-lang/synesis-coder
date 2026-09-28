@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from synesis_coder.block_assembler import count_item_blocks, dedupe_item_blocks
+from synesis_coder.block_assembler import count_item_blocks, dedupe_item_blocks, foreign_bibrefs
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.modes.abstract_mode import _generate_abstract_syn
 from synesis_coder.progress import BatchProgress
@@ -233,9 +233,11 @@ async def _process_dataset_async(
     external = _external_origin_fields(ctx)
 
     runtime_banner(llm_client, format=format, concurrent=concurrent)
-    logger.info("Iniciando geração (concurrent=%d)", concurrent)
+    # A concorrência já aparece no banner de motor; BatchProgress.start()
+    # anuncia o início. Uma terceira linha aqui seria redundante.
     start_time = time.monotonic()
     progress = BatchProgress(len(entries), unit="reg", usage=llm_client.usage)
+    progress.start()
 
     async def _one(index: int, entry: Dict[str, str]) -> Tuple[str, bool]:
         async with semaphore:
@@ -267,6 +269,21 @@ async def _process_dataset_async(
                 logger.warning(
                     "%s: %d bloco(s) ITEM duplicado(s) removido(s) — possível "
                     "loop degenerativo do modelo.", bibref, dupes,
+                )
+
+            # Identidade: o registro precisa manter a própria chave. Outra chave
+            # válida do projeto compila e atribuiria o texto a outro registro.
+            foreign = foreign_bibrefs(final, bibref)
+            if foreign:
+                ok = False
+                logger.error(
+                    "%s: a saída usa outra(s) chave(s) (%s) — registro rejeitado.",
+                    bibref, ", ".join(sorted(foreign)),
+                )
+                final = (
+                    f"# ERRO: a saída usa a(s) chave(s) {', '.join('@' + k for k in sorted(foreign))}"
+                    f" no lugar de @{bibref}; o texto seria atribuído a outro registro.\n"
+                    + final
                 )
 
             # Cobertura: a validação garante SINTAXE, não que algo foi anotado.

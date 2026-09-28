@@ -28,6 +28,49 @@ def test_format_rate_picks_readable_scale():
     assert format_rate(0.001, "ref") == "3.6 ref/h"
 
 
+def test_start_announces_before_any_unit_completes(caplog):
+    # Num backend lento a primeira conclusão pode levar dezenas de minutos: sem
+    # anúncio de início o terminal fica indistinguível de um processo travado.
+    p = BatchProgress(20, unit="ref")
+    with caplog.at_level(logging.INFO, logger=progress_mod.__name__):
+        p.start()
+    assert len(caplog.records) == 1
+    assert "20" in caplog.records[0].message
+    assert "ref" in caplog.records[0].message
+
+
+def test_start_is_silent_when_there_is_nothing_to_do(caplog):
+    p = BatchProgress(0, unit="ref")
+    with caplog.at_level(logging.INFO, logger=progress_mod.__name__):
+        p.start()
+    assert not caplog.records
+
+
+def test_start_does_not_count_as_progress(caplog):
+    # start() anuncia; não move o contador nem consome o throttling.
+    p = BatchProgress(2, unit="ref", min_interval=0)
+    with caplog.at_level(logging.INFO, logger=progress_mod.__name__):
+        p.start()
+        p.mark()
+    assert p.done == 1
+    assert "[1/2" in caplog.records[1].message
+
+
+def test_all_batch_modes_announce_start():
+    # Regressão: um modo que instancia BatchProgress e não chama start()
+    # volta ao silêncio inicial que motivou esta correção.
+    import re
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("synesis_coder/modes").glob("*_mode.py"):
+        src = path.read_text(encoding="utf-8")
+        m = re.search(r"(\w+) = BatchProgress\(", src)
+        if m and f"{m.group(1)}.start()" not in src:
+            offenders.append(path.name)
+    assert not offenders, f"modos sem anúncio de início: {offenders}"
+
+
 def test_emits_final_line_even_when_throttled(caplog):
     # Com intervalo alto só a última linha sai — mas ela SAI: é o fechamento
     # que diz ao pesquisador que a campanha terminou.
