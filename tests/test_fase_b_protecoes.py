@@ -24,6 +24,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from synesis_coder import project_loader, validator
+
+# Pastas e várias linhas em INCLUDE DATASET exigem o expand_include do synesis
+# >= 0.13. Com a 0.12 (a que o CI instala do PyPI até a 0.13 ser publicada), o
+# coder funciona pelo caminho antigo — só esses cenários não se aplicam.
+requer_synesis_013 = pytest.mark.skipif(
+    project_loader._expand_include is None,
+    reason="pastas em INCLUDE exigem synesis >= 0.13",
+)
 from synesis_coder.block_assembler import foreign_bibrefs
 from synesis_coder.project_loader import (
     _collect_includes,
@@ -98,6 +106,7 @@ def test_collect_includes_guarda_todos_os_bib(tmp_path):
     assert list(bib) == ["fontes/a.bib", "fontes/b.bib"]
 
 
+@requer_synesis_013
 def test_load_project_com_pasta_de_bib(tmp_path):
     _write(tmp_path / "Sources/a.bib", BIB_A)
     _write(tmp_path / "Sources/docente/b.bib", BIB_B)
@@ -302,6 +311,7 @@ def _dataset_project(tmp_path: Path, includes: str) -> Path:
     return synp
 
 
+@requer_synesis_013
 def test_dataset_soma_todas_as_linhas(tmp_path):
     _write(tmp_path / "lote1/r1.toml", '[meta]\nid = "rec-1"\n')
     _write(tmp_path / "lote2/r2.toml", '[meta]\nid = "rec-2"\n')
@@ -312,6 +322,7 @@ def test_dataset_soma_todas_as_linhas(tmp_path):
     assert set(ctx["dataset_index"]) == {"rec-1", "rec-2"}
 
 
+@requer_synesis_013
 def test_dataset_chave_repetida_aborta(tmp_path):
     _write(tmp_path / "d/a.toml", '[meta]\nid = "rec-1"\n')
     _write(tmp_path / "d/b.toml", '[meta]\nid = "rec-1"\n')

@@ -127,6 +127,14 @@ Correções:
 - **Só erros vão ao modelo de correção**, nos 4 laços de `validator.py`. Os
   avisos continuam no log, no `--debug` e no bloco de falha que o pesquisador lê.
 
+### Fixed — `bibtexparser` 2.x quebrava toda leitura de `.bib`
+
+A 2.0 foi publicada com API nova, sem `bibtexparser.loads`. A restrição
+`>=1.4`, sem teto, passou a instalá-la, e o CI falhou em todas as plataformas:
+tanto o `abstract_mode` quanto o `synesis` 0.12 publicado chamam `loads`. A
+dependência agora é `>=1.4,<2`. Os 3 testes da Fase B que exigem pastas em
+`INCLUDE` (synesis >= 0.13) são pulados quando a versão instalada é a 0.12.
+
 ### Added — várias bibliografias e datasets no projeto
 
 - **Todos os `.bib` declarados passam a valer.** O coder expandia o curinga de

@@ -34,7 +34,8 @@ dependencies = [
     "openai>=1.0",
     "click>=8.0",
     "tenacity>=8.0",
-    "bibtexparser>=1.4",
+    # 2.x trocou a API (sem `loads`); o synesis 0.12 publicado também quebra com ela.
+    "bibtexparser>=1.4,<2",
     "python-dotenv>=1.0",
 ]
 
