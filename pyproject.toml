@@ -34,7 +34,10 @@ dependencies = [
     "openai>=1.0",
     "click>=8.0",
     "tenacity>=8.0",
-    # 2.x trocou a API (sem `loads`); o synesis 0.12 publicado também quebra com ela.
+    # O coder já lê a 1.x e a 2.x (via synesis.parser.bib_loader.parse_bibtex,
+    # synesis >= 0.13.1). O teto < 2 fica enquanto a dependência aceitar o
+    # synesis 0.12/0.13.0, que só funcionam com a 1.x; sai junto com a subida
+    # para synesis >= 0.13.1.
     "bibtexparser>=1.4,<2",
     "python-dotenv>=1.0",
 ]

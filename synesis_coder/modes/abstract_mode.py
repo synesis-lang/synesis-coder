@@ -55,6 +55,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _bib_entries(content: str) -> List[Dict[str, str]]:
+    """Entradas do .bib, com o mesmo parse que o compilador usa na validação.
+
+    synesis >= 0.13.1 oferece `parse_bibtex`, que dá o mesmo resultado com o
+    bibtexparser 1.x e 2.x (a 2.0 trocou a API e, sem ajuste, entregava abstracts
+    com a indentação das linhas de continuação). Com um synesis mais antigo, a
+    dependência é `bibtexparser<2` e a API 1.x é usada direto.
+    """
+    try:
+        from synesis.parser.bib_loader import parse_bibtex
+    except ImportError:
+        return list(bibtexparser.loads(content).entries)
+    return parse_bibtex(content).entries
+
+
 def parse_bib_entries(bib_path: Path) -> List[Dict[str, str]]:
     """Lê um .bib e retorna entradas com abstract.
 
@@ -72,13 +87,12 @@ def parse_bib_entries(bib_path: Path) -> List[Dict[str, str]]:
     if not bib_path.exists():
         raise FileNotFoundError(f"Arquivo .bib não encontrado: {bib_path}")
 
-    with open(bib_path, "r", encoding="utf-8") as f:
-        bib_database = bibtexparser.load(f)
+    content = bib_path.read_text(encoding="utf-8")
 
     entries: List[Dict[str, str]] = []
     skipped = 0
 
-    for entry in bib_database.entries:
+    for entry in _bib_entries(content):
         bibref = entry.get("ID", "").strip()
         abstract = entry.get("abstract", "").strip()
 

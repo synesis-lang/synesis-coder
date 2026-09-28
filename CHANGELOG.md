@@ -135,6 +135,13 @@ tanto o `abstract_mode` quanto o `synesis` 0.12 publicado chamam `loads`. A
 dependência agora é `>=1.4,<2`. Os 3 testes da Fase B que exigem pastas em
 `INCLUDE` (synesis >= 0.13) são pulados quando a versão instalada é a 0.12.
 
+O `parse_bib_entries` do `abstract` passou a usar o `parse_bibtex` do synesis
+(>= 0.13.1), que dá o mesmo resultado com a 1.x e a 2.x. Os 65 abstracts da Kely
+saem idênticos nas duas versões. Com um synesis mais antigo, o coder usa a API
+1.x direto. Efeito colateral bem-vindo: entradas `@online`/`@dataset`, antes
+descartadas em silêncio pela 1.x, passam a ser lidas quando o synesis é o
+0.13.1. O teto `<2` sai quando a dependência subir para synesis >= 0.13.1.
+
 ### Added — várias bibliografias e datasets no projeto
 
 - **Todos os `.bib` declarados passam a valer.** O coder expandia o curinga de
