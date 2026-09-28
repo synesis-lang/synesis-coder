@@ -140,7 +140,11 @@ O `parse_bib_entries` do `abstract` passou a usar o `parse_bibtex` do synesis
 saem idênticos nas duas versões. Com um synesis mais antigo, o coder usa a API
 1.x direto. Efeito colateral bem-vindo: entradas `@online`/`@dataset`, antes
 descartadas em silêncio pela 1.x, passam a ser lidas quando o synesis é o
-0.13.1. O teto `<2` sai quando a dependência subir para synesis >= 0.13.1.
+0.13.1.
+
+⚠ **Exige `synesis>=0.13.1`** (antes `>=0.12.0`). O coder não importa mais o
+`bibtexparser` direto: o `.bib` é lido só pelo `parse_bibtex` do synesis, e a
+dependência (`>=1.4,<3`, 1.x e 2.x) passa a vir de lá.
 
 ### Added — várias bibliografias e datasets no projeto
 

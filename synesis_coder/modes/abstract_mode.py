@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import bibtexparser
+from synesis.parser.bib_loader import parse_bibtex
 
 from synesis_coder.block_assembler import (
     assemble_items,
@@ -58,15 +58,10 @@ logger = logging.getLogger(__name__)
 def _bib_entries(content: str) -> List[Dict[str, str]]:
     """Entradas do .bib, com o mesmo parse que o compilador usa na validação.
 
-    synesis >= 0.13.1 oferece `parse_bibtex`, que dá o mesmo resultado com o
-    bibtexparser 1.x e 2.x (a 2.0 trocou a API e, sem ajuste, entregava abstracts
-    com a indentação das linhas de continuação). Com um synesis mais antigo, a
-    dependência é `bibtexparser<2` e a API 1.x é usada direto.
+    `parse_bibtex` dá o mesmo resultado com o bibtexparser 1.x e 2.x (a 2.0
+    trocou a API e, sem ajuste, entregava abstracts com a indentação das linhas
+    de continuação).
     """
-    try:
-        from synesis.parser.bib_loader import parse_bibtex
-    except ImportError:
-        return list(bibtexparser.loads(content).entries)
     return parse_bibtex(content).entries
 
 
