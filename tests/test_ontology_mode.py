@@ -189,15 +189,42 @@ class TestUpdatePreservesExistingEntries:
 
 
 class TestBuildSemanticCtx:
-    def _make_item(self, source_ref="smith2024", text="sample text"):
-        item = MagicMock()
-        item.source_ref = source_ref
-        item.text = text
-        item.note = None
-        item.chain = None
-        item.topic = None
-        item.code = None
-        return item
+    """O contexto lê os ITEMs pelos campos do TEMPLATE (tipo), não por atributos
+    fixos. Antes, partia do `code_usage` (só CODE), de `item.source_ref` (o
+    ItemNode tem `bibref`) e de atributos `text`/`note`/`chain` inexistentes:
+    num projeto só-CHAIN todo conceito saía com frequência 0 e sem exemplos."""
+
+    def _fields(self):
+        from pathlib import Path
+
+        from synesis.ast.nodes import FieldSpec, FieldType, Scope, SourceLocation
+
+        loc = SourceLocation(file=Path("t.synt"), line=1, column=1)
+        return {
+            "trecho": FieldSpec(name="trecho", type=FieldType.QUOTATION, scope=Scope.ITEM, location=loc),
+            "observacao": FieldSpec(name="observacao", type=FieldType.MEMO, scope=Scope.ITEM, location=loc),
+            "relacoes": FieldSpec(name="relacoes", type=FieldType.CHAIN, scope=Scope.ITEM,
+                                  relations={"ENABLES": "A permite B"}, location=loc),
+        }
+
+    def _make_item(self, bibref="smith2024", text="sample text", chain=("Social_Acceptance", "ENABLES", "Deployment")):
+        from synesis.ast.nodes import ChainNode, ItemNode
+
+        cadeia = ChainNode(nodes=list(chain), relations=[chain[1]], location=None)
+        return ItemNode(bibref=bibref, quote="", extra_fields={
+            "trecho": text, "observacao": f"memo de {bibref}", "relacoes": cadeia})
+
+    def _linked(self, items, triples=()):
+        from synesis.ast.nodes import SourceNode
+
+        por_ref: dict = {}
+        for it in items:
+            por_ref.setdefault(it.bibref, []).append(it)
+        linked = MagicMock()
+        linked.sources = {b: SourceNode(bibref=b, fields={}, items=its) for b, its in por_ref.items()}
+        linked.code_usage = {}
+        linked.all_triples = list(triples)
+        return linked
 
     def test_frequency_and_sources_counted(self):
         """Frequência e fontes são contadas corretamente."""
@@ -208,19 +235,17 @@ class TestBuildSemanticCtx:
             self._make_item("jones2023"),
             self._make_item("smith2024"),  # mesma fonte
         ]
-        linked = MagicMock()
-        linked.code_usage = {"Social_Acceptance": items}
-        linked.all_triples = []
-
         result_mock = MagicMock()
-        result_mock.linked_project = linked
+        result_mock.linked_project = self._linked(items)
 
         ctx = _make_ctx(code_index_codes=["Social_Acceptance"])
         ctx["result"] = result_mock
+        ctx["item_fields"] = self._fields()
 
         sem_ctx = _build_semantic_ctx("Social_Acceptance", ctx)
         assert sem_ctx["frequency"] == 3
         assert sem_ctx["sources"] == 2
+        assert sem_ctx["co_codes"] == ["Deployment"]       # relação não é conceito
 
     def test_relations_extracted_from_triples(self):
         """Relações são extraídas dos triples onde o código aparece como A ou B."""
@@ -249,20 +274,22 @@ class TestBuildSemanticCtx:
         """Exemplos concretos incluem o campo text dos ITEMs."""
         from synesis_coder.modes.ontology_mode import _build_semantic_ctx
 
-        items = [self._make_item(text="Community trust is key.")]
-        linked = MagicMock()
-        linked.code_usage = {"Trust": items}
-        linked.all_triples = []
-
+        items = [self._make_item(text="Community trust is key.",
+                                 chain=("Trust", "ENABLES", "Acceptance"))]
         result_mock = MagicMock()
-        result_mock.linked_project = linked
+        result_mock.linked_project = self._linked(items)
 
         ctx = _make_ctx(code_index_codes=["Trust"])
         ctx["result"] = result_mock
+        ctx["item_fields"] = self._fields()
 
         sem_ctx = _build_semantic_ctx("Trust", ctx)
         assert len(sem_ctx["examples"]) == 1
-        assert sem_ctx["examples"][0].get("text") == "Community trust is key."
+        ex = sem_ctx["examples"][0]
+        # campos pelo TIPO, com os nomes declarados no template
+        assert ex.get("trecho") == "Community trust is key."
+        assert ex.get("observacao") == "memo de smith2024"
+        assert ex.get("relacoes") == "Trust -> ENABLES -> Acceptance"
 
     def test_no_linked_returns_empty_ctx(self):
         """Projeto sem linked_project retorna semantic_ctx vazio."""

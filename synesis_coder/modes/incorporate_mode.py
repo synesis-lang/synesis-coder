@@ -45,6 +45,7 @@ _log = logging.getLogger(__name__)
 # cabeçalho do .synr — sem o qual um template com campo homônimo receberia o
 # metadado da revisão como se fosse correção de campo.
 from synesis_coder.revision_vocab import META_TAGS as _META_TAGS  # noqa: E402
+from synesis_coder.revision_vocab import meta_tags_for  # noqa: E402
 
 # Valores que o LLM emite para pedir a REMOÇÃO de uma ocorrência de campo.
 # O formato de correção não previa remoção; modelos improvisaram `none` e
@@ -307,10 +308,13 @@ def _apply_revision_tags(
     # modelo, não duas correções legítimas (ver estudo §5, caso souza2022c).
     seen_by_field: dict[str, set[str]] = {}
 
+    # Metadado ou correção? Um campo declarado no template vence a reserva por
+    # costume (`note`); sem ctx, vale a lista fixa.
+    meta = meta_tags_for((ctx or {}).get("item_fields") or ()) if ctx else _META_TAGS
     for key, new_value in tags.items():
         # Normaliza chaves numeradas (ex: "chain.1" → campo "chain")
         base_key = key.split(".")[0] if re.match(r"^[\w]+\.\d+$", key) else key
-        if base_key in _META_TAGS or key.startswith("metrics."):
+        if base_key in meta or key.startswith("metrics."):
             continue
 
         normalized = new_value.strip()

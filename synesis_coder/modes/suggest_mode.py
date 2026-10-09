@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import List, Literal
 
+from synesis_coder.concept_index import definition_field
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import build_suggest_prompt, build_topic_filter_prompt
@@ -168,14 +169,16 @@ def _build_enriched_code_list(ctx: dict, topics: List[str]) -> str:
     candidates.sort(key=lambda c: -stats.get(c, 0))
     candidates = candidates[:_MAX_CODES_PER_TOPIC]
 
+    # Campo de definição pela DESCRIÇÃO no template, não pelo nome.
+    def_field = definition_field(ctx.get("ontology_fields") or {})
     lines = []
     for code in candidates:
         freq = stats.get(code, 0)
         # Buscar descrição na ontologia (case-insensitive)
         node = oi.get(code) or oi.get(code.lower())
         desc = ""
-        if node:
-            raw_desc = node.fields.get("ontology_description", "")
+        if node and def_field:
+            raw_desc = node.fields.get(def_field, "")
             if raw_desc:
                 desc = " - " + str(raw_desc)[:_ONTOLOGY_DESC_MAX]
 

@@ -44,14 +44,17 @@ from synesis_coder.synr_io import (
     parse_synr,
     write_synr,
 )
+from synesis_coder.variant_candidates import candidate_groups
 
 _log = logging.getLogger(__name__)
 
 # Separadores reconhecidos em cadeias CHAIN
 _CHAIN_SEP_RE = re.compile(r"\s*->\s*")
 
-# Campo chain ou code em bloco ITEM
-_FIELD_RE = re.compile(r"^\s*(chain|code)\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# Qualquer linha `campo: valor` de um bloco ITEM; quais são campos de termo
+# (CHAIN/CODE) decide `term_fields`, pelo TIPO no template — o regex não fixa
+# nomes. Comentários (`# $chain:`) não casam: o nome exige letra ou `_` no início.
+_FIELD_RE = re.compile(r"^\s*([A-Za-z_][\w]*)\s*:\s*(.+)$", re.MULTILINE)
 
 # Relações em CHAIN: palavras completamente em maiúsculas (ex: ENABLES, INFLUENCES)
 _RELATION_RE = re.compile(r"^[A-Z][A-Z_\-]+[A-Z]$")
@@ -140,29 +143,59 @@ def _extract_concepts_from_chain(chain_value: str) -> list[str]:
     return concepts
 
 
-def _extract_codes_from_item_block(item_block: str) -> list[tuple[str, str, str]]:
+# Sem projeto carregado, os campos de termo são reconhecidos pelos nomes
+# tradicionais (comportamento anterior). Com projeto, pelo TIPO no template.
+_LEGACY_TERM_FIELDS: dict[str, str] = {"chain": "CHAIN", "code": "CODE"}
+
+
+def term_fields_from_ctx(ctx: Optional[dict]) -> dict[str, str]:
+    """{nome_em_minúsculas: "CHAIN" | "CODE"} dos campos de termo ABERTOS do ITEM.
+
+    Pelo TIPO declarado no template, nunca pelo nome: um CHAIN chamado
+    `relacoes` ou um CODE chamado `codigos` eram ignorados pelo normalize.
+    Campos de lista fechada (`values`) ficam de fora — o vocabulário deles é
+    fixado pelo template. Sem campo de termo no template, usa os nomes
+    tradicionais.
+    """
+    fields = {}
+    for name, spec in ((ctx or {}).get("item_fields") or {}).items():
+        tipo = getattr(getattr(spec, "type", None), "name", "")
+        if tipo in ("CHAIN", "CODE") and not getattr(spec, "values", None):
+            fields[name.lower()] = tipo
+    return fields or dict(_LEGACY_TERM_FIELDS)
+
+
+def _extract_codes_from_item_block(
+    item_block: str, term_fields: Optional[dict[str, str]] = None
+) -> list[tuple[str, str, str]]:
     """Extrai todos os códigos de um bloco ITEM.
+
+    Args:
+        term_fields: {nome: "CHAIN" | "CODE"} (ver `term_fields_from_ctx`);
+            None usa os nomes tradicionais `chain` e `code`.
 
     Returns:
         Lista de (field_name, raw_code, full_field_value) para cada código encontrado.
     """
+    fields = term_fields or _LEGACY_TERM_FIELDS
     results: list[tuple[str, str, str]] = []
     for m in _FIELD_RE.finditer(item_block):
         field_name = m.group(1).strip().lower()
         field_value = m.group(2).strip()
+        tipo = fields.get(field_name)
 
-        if field_name == "chain":
+        if tipo == "CHAIN":
             concepts = _extract_concepts_from_chain(field_value)
             for concept in concepts:
                 results.append((field_name, concept, field_value))
-        elif field_name == "code":
+        elif tipo == "CODE":
             results.append((field_name, field_value, field_value))
 
     return results
 
 
 def _extract_codes_from_doc(
-    doc: SynrDocument, file_path: Path
+    doc: SynrDocument, file_path: Path, term_fields: Optional[dict[str, str]] = None
 ) -> list[tuple[str, str, str, str, str]]:
     """Extrai todos os códigos do documento para o inventário global.
 
@@ -190,7 +223,7 @@ def _extract_codes_from_doc(
                 item_lines.append(lines[i])
 
             item_block = "".join(item_lines)
-            for field_name, raw_code, full_value in _extract_codes_from_item_block(item_block):
+            for field_name, raw_code, full_value in _extract_codes_from_item_block(item_block, term_fields):
                 nkey = _normalize_code_key(raw_code)
                 results.append((bibref, field_name, raw_code, full_value, nkey))
         i += 1
@@ -204,7 +237,8 @@ def _extract_codes_from_doc(
 
 
 def build_code_inventory(
-    docs_with_paths: list[tuple[Path, SynrDocument]]
+    docs_with_paths: list[tuple[Path, SynrDocument]],
+    term_fields: Optional[dict[str, str]] = None,
 ) -> dict[str, CodeGroup]:
     """Constrói inventário global de códigos a partir de múltiplos documentos.
 
@@ -214,7 +248,7 @@ def build_code_inventory(
     inventory: dict[str, CodeGroup] = {}
 
     for file_path, doc in docs_with_paths:
-        codes = _extract_codes_from_doc(doc, file_path)
+        codes = _extract_codes_from_doc(doc, file_path, term_fields)
         for bibref, field_name, raw_code, full_value, nkey in codes:
             if nkey not in inventory:
                 inventory[nkey] = CodeGroup(normalized_key=nkey)
@@ -384,7 +418,8 @@ def _substitute_code_in_chain(chain_value: str, old_code: str, new_code: str) ->
 
 
 def _build_revisions_for_doc(
-    doc: SynrDocument, file_path: Path, inventory: dict[str, CodeGroup]
+    doc: SynrDocument, file_path: Path, inventory: dict[str, CodeGroup],
+    term_fields: Optional[dict[str, str]] = None,
 ) -> list[Optional[dict[str, str]]]:
     """Gera lista de revisões (ou None) por bloco ITEM do documento.
 
@@ -414,12 +449,14 @@ def _build_revisions_for_doc(
 
             item_block = "".join(item_lines)
             item_tags: dict[str, str] = {}
+            fields = term_fields or _LEGACY_TERM_FIELDS
 
             for fm in _FIELD_RE.finditer(item_block):
                 field_name = fm.group(1).strip().lower()
                 field_value = fm.group(2).strip()
+                tipo = fields.get(field_name)
 
-                if field_name == "chain":
+                if tipo == "CHAIN":
                     new_value = field_value
                     concepts = _extract_concepts_from_chain(field_value)
                     changed = False
@@ -430,13 +467,13 @@ def _build_revisions_for_doc(
                             new_value = _substitute_code_in_chain(new_value, concept, group.canonical)
                             changed = True
                     if changed:
-                        item_tags["chain"] = new_value
+                        item_tags[field_name] = new_value
 
-                elif field_name == "code":
+                elif tipo == "CODE":
                     nkey = _normalize_code_key(field_value)
                     group = inventory.get(nkey)
                     if group and group.canonical and group.canonical != field_value:
-                        item_tags["code"] = group.canonical
+                        item_tags[field_name] = group.canonical
 
             if item_tags:
                 item_tags["phase"] = "normalize"
@@ -533,7 +570,8 @@ async def _process_normalize_async(
     _log.info("Normalize: %d arquivo(s) lido(s)", len(docs_with_paths))
 
     # 3. Construir inventário global
-    inventory = build_code_inventory(docs_with_paths)
+    term_fields = term_fields_from_ctx(ctx)
+    inventory = build_code_inventory(docs_with_paths, term_fields)
     total_codes = len(inventory)
     _log.info("Inventário: %d código(s) único(s) encontrado(s)", total_codes)
 
@@ -550,8 +588,20 @@ async def _process_normalize_async(
     )
 
     # 5. Salvar inventário em TXT se solicitado
+    # Candidatos a variante (flexão, separador, acento): só DIAGNÓSTICO — nada é
+    # substituído por eles (a regra lexical funde pais/país, avó/avô...).
+    candidatos = candidate_groups(
+        form for g in inventory.values() for form in g.variants
+    )
+    if candidatos:
+        _log.info(
+            "%d grupo(s) de possíveis variantes (flexão/separador/acento) — "
+            "só diagnóstico, nada foi substituído; ver o inventário.",
+            len(candidatos),
+        )
+
     if inventory_path:
-        _write_inventory_txt(inventory, Path(inventory_path))
+        _write_inventory_txt(inventory, Path(inventory_path), candidatos)
 
     # 6. LLM para grupos residuais (chunked, concurrent)
     llm_client = LLMClient(model=model)
@@ -599,7 +649,7 @@ async def _process_normalize_async(
     total_items_corpus = 0
     items_revised = 0
     for file_path, doc in docs_with_paths:
-        revisions = _build_revisions_for_doc(doc, file_path, inventory)
+        revisions = _build_revisions_for_doc(doc, file_path, inventory, term_fields)
         total_items_corpus += len(revisions)
         n_revised = sum(1 for r in revisions if r is not None)
         items_revised += n_revised
@@ -680,8 +730,11 @@ async def _process_normalize_async(
 # ---------------------------------------------------------------------------
 
 
-def _write_inventory_txt(inventory: dict[str, CodeGroup], path: Path) -> None:
-    """Escreve inventário de códigos em arquivo TXT."""
+def _write_inventory_txt(
+    inventory: dict[str, CodeGroup], path: Path,
+    candidates: Optional[list[list[str]]] = None,
+) -> None:
+    """Escreve inventário de códigos em arquivo TXT (com os candidatos a variante)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Synesis-Coder Code Inventory",
@@ -696,6 +749,13 @@ def _write_inventory_txt(inventory: dict[str, CodeGroup], path: Path) -> None:
         for form, count in sorted(group.variants.items(), key=lambda x: -x[1]):
             marker = "*" if form == group.canonical else " "
             lines.append(f"  {marker} {form!r:40s}  n={count}")
+    if candidates:
+        lines += [
+            "",
+            "# Possíveis variantes (flexão, separador, acento) — DIAGNÓSTICO.",
+            "# Nada foi substituído: a equivalência depende do sentido (ex.: pais × país).",
+        ]
+        lines += ["  " + " | ".join(g) for g in candidates]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

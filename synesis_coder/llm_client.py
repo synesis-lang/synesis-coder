@@ -29,9 +29,20 @@ import os
 import threading
 import time
 from collections import deque
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from dotenv import load_dotenv
+
+from synesis_coder.anthropic_caps import (
+    AnthropicCaps,
+    plan_request,
+    requested_effort,
+    resolve_caps,
+    table_caps,
+    unsupported_param,
+    warn_once,
+)
+from synesis_coder.anthropic_caps import without as caps_without
 
 if TYPE_CHECKING:
     from synesis_coder.debug_log import DebugRecorder
@@ -141,20 +152,9 @@ def get_concurrent(default: int) -> int:
     return value
 
 
-# Modelos compatíveis com extended thinking (Anthropic Claude 4.x)
-_THINKING_CAPABLE_MODELS = frozenset({
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-5-20250929",
-    "claude-3-7-sonnet-latest",
-    "claude-3-7-sonnet-20250219",
-})
-
-# Modelos que deprecaram o parâmetro `temperature` — API retorna 400 se enviado
-_TEMPERATURE_DEPRECATED_MODELS = frozenset({
-    "claude-opus-4-7",
-})
+# Capacidades por modelo Claude (temperature, raciocínio, esforço): ver
+# anthropic_caps.py. As listas de nomes que ficavam aqui não cobriam a geração 5
+# — todo Claude 5.x recebia `temperature` e falhava com HTTP 400.
 
 
 def _get_env_temperature() -> Optional[float]:
@@ -444,16 +444,59 @@ def _thinking_off_params(model: str) -> dict:
     return {}
 
 
+# Modelos cujo raciocínio não desliga: recusam `effort: "none"` e aceitam no mínimo "low".
+_MANDATORY_REASONING_MARKERS = ("gpt-oss",)
+_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high")
+
+
+def _is_openrouter(api_url: str) -> bool:
+    return "openrouter.ai" in (api_url or "").lower()
+
+
+def _reasoning_off_params(model: str, api_url: str) -> dict:
+    """Parâmetros que desligam (ou reduzem ao mínimo) o raciocínio no backend openai-compat.
+
+    O formato depende do SERVIDOR, não só do modelo:
+    - OpenRouter normaliza tudo no objeto `reasoning`; `effort: "none"` desliga. As
+      chaves do Ollama (`think`, `chat_template_kwargs`) são ignoradas lá — medido em
+      2026-09-30: qwen3.8-27b raciocinou até esgotar max_tokens=16000 e caiu para
+      texto livre.
+    - Ollama/vLLM seguem `_thinking_off_params` (por família), e o gpt-oss recebe
+      `reasoning_effort`.
+    Modelos de raciocínio obrigatório (gpt-oss) recusam "none" e vão para "low".
+    `SYNESIS_CODER_REASONING_EFFORT` força um nível explícito.
+
+    Returns:
+        Dict para `extra_body`; vazio quando não há controle conhecido.
+    """
+    name = model.lower() if isinstance(model, str) else ""
+    mandatory = any(m in name for m in _MANDATORY_REASONING_MARKERS)
+    forced = os.environ.get("SYNESIS_CODER_REASONING_EFFORT", "").strip().lower()
+    if forced and forced not in _REASONING_EFFORTS:
+        _log.warning("SYNESIS_CODER_REASONING_EFFORT=%r ignorado (use %s)",
+                     forced, ", ".join(_REASONING_EFFORTS))
+        forced = ""
+    effort = forced or ("low" if mandatory else "none")
+    if mandatory and effort == "none":
+        effort = "low"
+
+    if _is_openrouter(api_url):
+        return {"reasoning": {"effort": effort}}
+    params = dict(_thinking_off_params(model))
+    if mandatory or forced:
+        params["reasoning_effort"] = effort
+    return params
+
+
 def _model_supports_thinking(model: str) -> bool:
-    """Verifica se o modelo suporta extended thinking (Anthropic Claude 4.x)."""
-    base = model.split(":")[0].lower()
-    return any(base.startswith(m) for m in _THINKING_CAPABLE_MODELS)
+    """O modelo aceita algum modo de raciocínio pedido pelo coder (pela tabela)."""
+    caps = table_caps(model)
+    return bool(caps.thinking_types & {"enabled", "adaptive"})
 
 
 def _model_deprecates_temperature(model: str) -> bool:
-    """Verifica se o modelo rejeita o parâmetro temperature (ex: claude-opus-4-7)."""
-    base = model.split(":")[0].lower()
-    return any(base.startswith(m) for m in _TEMPERATURE_DEPRECATED_MODELS)
+    """O modelo recusa `temperature` (pela tabela; o 400 corrige em execução)."""
+    return not table_caps(model).temperature
 
 
 def _estimate_max_tokens(messages: list, model_cap: int) -> int:
@@ -540,8 +583,9 @@ class LLMClient:
         if self.backend == "openai":
             import openai
 
+            self._api_url = api_url or _get_api_url()
             self._client = openai.OpenAI(
-                base_url=f"{api_url or _get_api_url()}/v1",
+                base_url=f"{self._api_url}/v1",
                 api_key=api_key or _get_api_key(),
             )
             self._rate_limit_enabled = False
@@ -1099,17 +1143,20 @@ class LLMClient:
             max_tokens = dynamic
 
         retryable = self._retryable_errors
+        # Parâmetros efetivamente enviados (Anthropic), para o recorder: o PEDIDO
+        # do chamador pode ser traduzido conforme as capacidades do modelo.
+        sent: dict = {}
 
         if self.backend == "openai":
             _, api_messages = self._translate_messages(messages)
 
-            # Desativar o raciocínio interno depende do MODELO — não há
-            # parâmetro comum. Enviar a forma errada não é inócuo: `think:false`
+            # Desativar o raciocínio interno depende do SERVIDOR e do MODELO — não
+            # há parâmetro comum. Enviar a forma errada não é inócuo: `think:false`
             # num Gemma devolve conteúdo VAZIO consumindo todo o max_tokens
-            # (medido). Daí o despacho explícito por família.
+            # (medido); no OpenRouter, as chaves do Ollama são ignoradas.
             extra: dict = {}
             if not thinking:
-                extra.update(_thinking_off_params(self.model))
+                extra.update(_reasoning_off_params(self.model, self._api_url))
 
             @retry(
                 retry=retry_if_exception_type(retryable),
@@ -1191,17 +1238,37 @@ class LLMClient:
                 (thinking_budget if thinking_budget is not None else _get_thinking_budget())
                 if thinking else 0
             )
-            use_thinking = budget > 0
+            want_thinking = budget > 0
+            effort = requested_effort()
 
-            if use_thinking and not _model_supports_thinking(self.model):
-                _log.warning(
-                    "SYNESIS_CODER_THINKING_BUDGET=%d ignorado: modelo '%s' não suporta "
-                    "extended thinking. Modelos compatíveis: claude-opus-4-7, "
-                    "claude-opus-4-6, claude-sonnet-4-6. "
-                    "Altere SYNESIS_CODER_MODEL para ativar.",
-                    budget, self.model,
+            def _build_kwargs() -> dict:
+                plan = plan_request(
+                    self.model, self._caps(), want_thinking=want_thinking, budget=budget,
+                    temperature=temperature, max_tokens=max_tokens, effort=effort,
                 )
-                use_thinking = False
+                kwargs: dict = {
+                    "model": self.model,
+                    "max_tokens": plan.max_tokens,
+                    "messages": api_messages,
+                    **{k: v for k, v in plan.params.items() if k != "output_config"},
+                }
+                output_config: dict = dict(plan.params.get("output_config") or {})
+                if system_blocks:
+                    kwargs["system"] = system_blocks
+                if schema is not None:
+                    # Structured outputs (Anthropic): schema saneado para o
+                    # constrained decoding. Erro/refusal/truncamento → o chamador
+                    # (call_json) cai no texto livre via _parse_json_response=None.
+                    output_config["format"] = {
+                        "type": "json_schema",
+                        "schema": _sanitize_schema_for_anthropic(schema),
+                    }
+                if output_config:
+                    kwargs["output_config"] = output_config
+                sent.clear()
+                sent.update(temperature=kwargs.get("temperature"),
+                            max_tokens=kwargs["max_tokens"], thinking=plan.thinking_label)
+                return kwargs
 
             @retry(
                 retry=retry_if_exception_type(retryable),
@@ -1210,32 +1277,26 @@ class LLMClient:
                 reraise=True,
             )
             def _call_with_retry() -> str:
-                kwargs: dict = {
-                    "model": self.model,
-                    "max_tokens": max(max_tokens, budget + 4096) if use_thinking else max_tokens,
-                    "messages": api_messages,
-                }
-                if use_thinking:
-                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                    kwargs["temperature"] = 1.0
-                elif not _model_deprecates_temperature(self.model):
-                    # None → determinístico (0.0); valor explícito/env → respeitar
-                    kwargs["temperature"] = temperature if temperature is not None else 0.0
-                # else: modelo deprecou temperature — omitir (ex: claude-opus-4-7)
-                if system_blocks:
-                    kwargs["system"] = system_blocks
-                if schema is not None:
-                    # Structured outputs (Anthropic): schema saneado para o
-                    # constrained decoding. Erro/refusal/truncamento → o chamador
-                    # (call_json) cai no texto livre via _parse_json_response=None.
-                    kwargs["output_config"] = {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": _sanitize_schema_for_anthropic(schema),
-                        }
-                    }
-
-                response = self._client.messages.create(**kwargs)
+                kwargs = _build_kwargs()
+                try:
+                    response = self._anthropic_create(kwargs)
+                except Exception as exc:
+                    # Só o 400 de PARÂMETRO NÃO SUPORTADO é corrigido aqui, uma
+                    # vez, e a correção vale para o resto da sessão. Qualquer
+                    # outro erro segue para o retry/propagação de sempre — achar
+                    # a palavra "temperature" num erro qualquer não basta.
+                    fix = unsupported_param(exc)
+                    if fix is None:
+                        raise
+                    self._anthropic_caps = caps_without(self._caps(), fix)
+                    warn_once(self.model, (
+                        f"O modelo '{self.model}' recusou "
+                        f"{'temperature' if fix[0] == 'temperature' else 'thinking.type=' + fix[1]}; "
+                        "a chamada foi repetida sem ele e a correção vale para a sessão. "
+                        "Atualize a tabela em anthropic_caps.py."
+                    ))
+                    kwargs = _build_kwargs()
+                    response = self._anthropic_create(kwargs)
                 self._record_usage(response.usage)
 
                 if response.stop_reason == "refusal":
@@ -1253,7 +1314,7 @@ class LLMClient:
                 # Itera blocos — com thinking ativo, content[0] é ThinkingBlock
                 for block in response.content:
                     if block.type == "text":
-                        return block.text
+                        return str(block.text)
 
                 block_types = [b.type for b in response.content]
                 if response.stop_reason == "max_tokens":
@@ -1293,10 +1354,49 @@ class LLMClient:
             input_tokens=self.usage.input_tokens - tokens_before_in,
             output_tokens=self.usage.output_tokens - tokens_before_out,
             model=self.model,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            # o que foi ENVIADO (pode diferir do pedido: modelo sem temperature,
+            # reserva de raciocínio somada ao max_tokens)
+            temperature=sent.get("temperature", temperature) if sent else temperature,
+            max_tokens=sent.get("max_tokens", max_tokens) if sent else max_tokens,
         )
         return result
+
+    # O SDK anthropic recusa chamada NÃO-streaming cuja duração estimada passe de
+    # 10 min: estimativa = 3600 s × max_tokens / 128.000, ou seja, ≈ 21.333 tokens.
+    # A reserva de raciocínio (Opus 5.5 não desliga) somada a um max_tokens de
+    # 16.000 já passa disso.
+    _NONSTREAMING_MAX_TOKENS = 21_000
+
+    def _anthropic_create(self, kwargs: dict):
+        """`messages.create`, ou streaming quando o max_tokens exige (mesmo resultado)."""
+        client: Any = self._client  # anthropic.Anthropic neste backend
+        if kwargs.get("max_tokens", 0) > self._NONSTREAMING_MAX_TOKENS:
+            with client.messages.stream(**kwargs) as stream:
+                return stream.get_final_message()
+        return client.messages.create(**kwargs)
+
+    def _caps(self) -> AnthropicCaps:
+        """Capacidades do modelo Anthropic (tabela + Models API), resolvidas uma vez."""
+        caps = getattr(self, "_anthropic_caps", None)
+        if caps is None:
+            caps = resolve_caps(self.model, getattr(self, "_client", None))
+            self._anthropic_caps = caps
+        return caps
+
+    def thinking_label(self, want_thinking: bool = False) -> str:
+        """O que acontece com o raciocínio numa chamada típica (para o banner).
+
+        `want_thinking=False` é o caso dos caminhos JSON e de correção. Vazio
+        quando nada é enviado e o modelo não raciocina por padrão.
+        """
+        if self.backend != "anthropic":
+            return ""
+        budget = _get_thinking_budget() if want_thinking else 0
+        plan = plan_request(
+            self.model, self._caps(), want_thinking=budget > 0, budget=budget,
+            temperature=None, max_tokens=1, effort=requested_effort(),
+        )
+        return str(plan.thinking_label)
 
     def _recorder_phase(self) -> str:
         """Fase para o recorder a partir do contexto da thread atual.

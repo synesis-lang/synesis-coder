@@ -105,6 +105,7 @@ def load_project(
             "topic_index"         — dict: {"topics", "topic_members", "empty"}
             "ontology_index"      — Dict[str, OntologyNode]
             "bib_keys"            — List[str]: chaves do .bib (ordenadas)
+            "bib_entries"         — Dict[str, dict]: entradas parseadas (chave e campos em minúsculas)
             "project_description" — Optional[str]: descrição do .synp
             "project_content"     — str
             "template_content"    — str
@@ -232,6 +233,7 @@ def load_project(
 
     # Chaves do .bib já parseado pelo compilador (sem reparse)
     bib_keys: List[str] = sorted(result.bibliography.keys()) if result.bibliography else []
+    bib_entries: Dict[str, dict] = dict(result.bibliography) if result.bibliography else {}
 
     # Descrição do projeto (já processada pelo compilador)
     project_description: Optional[str] = None
@@ -256,6 +258,7 @@ def load_project(
         "topic_index": topic_index,
         "ontology_index": ontology_index,
         "bib_keys": bib_keys,
+        "bib_entries": bib_entries,  # campos de cada entrada (ex.: abstract p/ o SOURCE)
         "project_description": project_description,
         "project_content": project_content,
         "template_content": template_content,

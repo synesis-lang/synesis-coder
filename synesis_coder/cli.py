@@ -926,8 +926,9 @@ _EPILOG_ANCHOR = _ex(
 @click.option("--project", "project_path", default=None,
               type=click.Path(exists=True, path_type=Path),
               help="Path to the .synp file. Auto-detected from the .syn directory if omitted.")
-@click.option("--field", default="text", show_default=True,
-              help="ITEM field holding the source excerpt.")
+@click.option("--field", default=None,
+              help="ITEM field holding the source excerpt. Default: the QUOTATION "
+                   "field(s) declared in the template.")
 @click.option("--strict", is_flag=True, default=False,
               help="Exit with code 1 when any excerpt is not anchored.")
 def anchor(syn_file, project_path, field, strict):
@@ -938,8 +939,12 @@ def anchor(syn_file, project_path, field, strict):
     relations, but does not verify that the annotated excerpt exists in the
     source.
     """
-    from synesis_coder.anchor_check import check_anchoring, format_report
-    from synesis_coder.modes.critique_mode import _resolve_project
+    from synesis_coder.anchor_check import (
+        check_anchoring,
+        format_report,
+        items_without_excerpt,
+    )
+    from synesis_coder.modes.critique_mode import _resolve_project, quotation_fields
 
     try:
         resolved = _resolve_project(Path(syn_file), project_path)
@@ -961,8 +966,11 @@ def anchor(syn_file, project_path, field, strict):
 
         content = Path(syn_file).read_text(encoding="utf-8")
         total = len(re.findall(r"^ITEM\s+@\S+\s*$", content, re.MULTILINE))
-        issues = check_anchoring(content, bib_content, field=field)
-        click.echo(format_report(issues, total))
+        # O trecho está nos campos QUOTATION do template (o nome varia por projeto).
+        fields = [field] if field else quotation_fields(ctx)
+        issues = check_anchoring(content, bib_content, fields=fields)
+        missing = items_without_excerpt(content, fields)
+        click.echo(format_report(issues, total, without_excerpt=missing, fields=fields))
 
         if issues and strict:
             sys.exit(1)

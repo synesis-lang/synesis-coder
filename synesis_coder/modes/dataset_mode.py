@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from synesis_coder.block_assembler import count_item_blocks, dedupe_item_blocks, foreign_bibrefs
+from synesis_coder.concept_index import has_open_term_fields
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.modes.abstract_mode import _generate_abstract_syn
 from synesis_coder.progress import BatchProgress
@@ -217,6 +218,21 @@ async def _process_dataset_async(
         tolerate_annotation_errors=True,
         dataset_glob_override=dataset_glob,
     )
+    # Cobertura da lista de conceitos: sem as anotações, o code_index saía VAZIO
+    # e cada registro inventava rótulos do zero. Só recarrega quando o template
+    # tem CODE/CHAIN abertos no ITEM (extração determinística, como o Lattes,
+    # não reusa vocabulário). Anotações inválidas seguem toleradas.
+    if has_open_term_fields(ctx.get("item_fields", {})):
+        ctx = load_project(
+            project_path,
+            load_annotations=True,
+            tolerate_annotation_errors=True,
+            dataset_glob_override=dataset_glob,
+        )
+        logger.info(
+            "Lista de conceitos existentes: %d conceito(s) das anotações do projeto.",
+            len(ctx["code_index"].get("codes", [])),
+        )
     entries = parse_dataset_records(ctx)
     if not entries:
         return "Nenhum registro no dataset — nada a processar."

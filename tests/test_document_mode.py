@@ -614,6 +614,71 @@ class TestDocumentPromptBuilder:
 
 
 # ---------------------------------------------------------------------------
+# Testes do contexto do SOURCE (sem LLM)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSourceContext:
+    """O SOURCE lê o abstract do .bib quando existe; senão, o início do documento."""
+
+    DOC = "Introdução. " * 100  # 1.200 chars
+
+    def _ctx(self, **fields) -> dict:
+        return {"bib_entries": {"silva2024": {"ENTRYTYPE": "article", **fields}}}
+
+    def test_uses_title_keywords_and_full_abstract(self):
+        from synesis_coder.modes.document_mode import _build_source_context
+
+        abstract = "Método survey com 300 respondentes. " * 30  # > 500 chars
+        ctx = self._ctx(title="Um {Título}", keywords="phishing, fraude", abstract=abstract)
+        text, origin = _build_source_context(ctx, "silva2024", self.DOC)
+
+        assert origin == "abstract do .bib"
+        assert text.startswith("Title: Um Título\nKeywords: phishing, fraude\nAbstract: ")
+        assert abstract.strip() in text  # abstract inteiro, sem corte em 500
+        assert "Introdução" not in text
+
+    def test_bibref_lookup_ignores_case_and_at_sign(self):
+        from synesis_coder.modes.document_mode import _build_source_context
+
+        ctx = self._ctx(abstract="Resumo.")
+        _, origin = _build_source_context(ctx, "@Silva2024", self.DOC)
+        assert origin == "abstract do .bib"
+
+    def test_optional_title_and_keywords(self):
+        from synesis_coder.modes.document_mode import _build_source_context
+
+        text, _ = _build_source_context(self._ctx(abstract="Resumo."), "silva2024", self.DOC)
+        assert text == "Abstract: Resumo."
+
+    def test_fallback_without_abstract(self):
+        from synesis_coder.modes.document_mode import (
+            SOURCE_EXCERPT_CHARS,
+            _build_source_context,
+        )
+
+        for ctx in (self._ctx(title="Só título"), self._ctx(abstract="  "), {}):
+            text, origin = _build_source_context(ctx, "silva2024", self.DOC)
+            assert origin == "início do documento"
+            assert text == self.DOC[:SOURCE_EXCERPT_CHARS].strip()
+
+    def test_source_prompt_does_not_truncate_context(self):
+        from synesis_coder.project_loader import load_project
+        from synesis_coder.prompt_builder import build_document_source_values_prompt
+
+        ctx = load_project(PROJECT_SOCIAL)
+        long_context = "Abstract: " + "x" * 2000
+        messages = build_document_source_values_prompt(ctx, "ref1", long_context)
+        assert long_context in messages[1]["content"]
+
+    def test_load_project_exposes_bib_entries(self):
+        from synesis_coder.project_loader import load_project
+
+        ctx = load_project(PROJECT_SOCIAL)
+        assert set(ctx["bib_entries"]) == set(ctx["bib_keys"])
+
+
+# ---------------------------------------------------------------------------
 # Testes de read_document (sem LLM)
 # ---------------------------------------------------------------------------
 

@@ -242,13 +242,59 @@ class TestThinkingOffParams:
 
     def test_banner_agrees_with_what_is_sent(self):
         """O banner não pode anunciar o que o cliente não envia."""
-        from synesis_coder.llm_client import _thinking_off_params
+        from synesis_coder.llm_client import _reasoning_off_params
         from synesis_coder.runtime_info import _thinking_disabled
 
         class _C:
-            def __init__(self, model):
-                self.model = model
+            def __init__(self, model, url="http://localhost:11434"):
+                self.model, self.backend, self._api_url = model, "openai", url
 
         for model in ("qwen3:27b", "gemma-4-26b-it", "claude-sonnet-5", "gpt-4"):
-            esperado = bool(_thinking_off_params(model))
-            assert _thinking_disabled(_C(model)) is esperado, model
+            esperado = bool(_reasoning_off_params(model, "http://localhost:11434"))
+            assert bool(_thinking_disabled(_C(model))) is esperado, model
+        assert (_thinking_disabled(_C("qwen/qwen3.8-27b", "https://openrouter.ai/api"))
+                == "raciocínio desativado")
+        assert (_thinking_disabled(_C("openai/gpt-oss-120b", "https://openrouter.ai/api"))
+                == "raciocínio mínimo (low)")
+
+
+class TestReasoningOffParams:
+    """O controle de raciocínio depende do servidor (OpenRouter × Ollama) e do modelo."""
+
+    OR = "https://openrouter.ai/api"
+    LOCAL = "http://192.168.1.47:11434"
+
+    def test_openrouter_uses_reasoning_object(self, monkeypatch):
+        from synesis_coder.llm_client import _reasoning_off_params
+
+        monkeypatch.delenv("SYNESIS_CODER_REASONING_EFFORT", raising=False)
+        # as chaves do Ollama são ignoradas no OpenRouter: não enviá-las
+        assert _reasoning_off_params("qwen/qwen3.8-27b", self.OR) == {"reasoning": {"effort": "none"}}
+        assert _reasoning_off_params("google/gemma-4-31b", self.OR) == {"reasoning": {"effort": "none"}}
+
+    def test_mandatory_reasoning_goes_to_low(self, monkeypatch):
+        from synesis_coder.llm_client import _reasoning_off_params
+
+        monkeypatch.delenv("SYNESIS_CODER_REASONING_EFFORT", raising=False)
+        assert _reasoning_off_params("openai/gpt-oss-120b", self.OR) == {"reasoning": {"effort": "low"}}
+        assert _reasoning_off_params("gpt-oss:120b", self.LOCAL) == {"reasoning_effort": "low"}
+
+    def test_local_keeps_family_params(self, monkeypatch):
+        from synesis_coder.llm_client import _reasoning_off_params
+
+        monkeypatch.delenv("SYNESIS_CODER_REASONING_EFFORT", raising=False)
+        assert _reasoning_off_params("qwen3:27b", self.LOCAL) == {"think": False}
+        assert _reasoning_off_params("gemma-4-26b-it", self.LOCAL) == {
+            "chat_template_kwargs": {"enable_thinking": False}}
+        assert _reasoning_off_params("gpt-4", self.LOCAL) == {}
+
+    def test_env_override(self, monkeypatch):
+        from synesis_coder.llm_client import _reasoning_off_params
+
+        monkeypatch.setenv("SYNESIS_CODER_REASONING_EFFORT", "medium")
+        assert _reasoning_off_params("qwen/qwen3.8-27b", self.OR) == {"reasoning": {"effort": "medium"}}
+        # raciocínio obrigatório nunca recebe "none"
+        monkeypatch.setenv("SYNESIS_CODER_REASONING_EFFORT", "none")
+        assert _reasoning_off_params("openai/gpt-oss-120b", self.OR) == {"reasoning": {"effort": "low"}}
+        monkeypatch.setenv("SYNESIS_CODER_REASONING_EFFORT", "turbo")
+        assert _reasoning_off_params("qwen/qwen3.8-27b", self.OR) == {"reasoning": {"effort": "none"}}

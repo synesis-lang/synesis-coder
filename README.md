@@ -19,8 +19,8 @@ from the project template.
 
 | Package | This version | Requires `synesis` | Python |
 |---|---|---|---|
-| synesis | 0.13.1 | — | ≥3.10 |
-| synesis-coder | 0.12.0 | ≥0.13.1 | ≥3.10 |
+| synesis | 0.13.2 | — | ≥3.10 |
+| synesis-coder | 0.13.0 | ≥0.13.1 | ≥3.10 |
 | synesis-lsp | 0.23.0 | ≥0.10.0 | ≥3.10 |
 | synesis-graph | 0.11.0 | ≥0.10.0 | ≥3.10 |
 
@@ -587,7 +587,10 @@ See `.env.example` for the complete, commented reference. Key variables:
 | `SYNESIS_CODER_MAX_RPM` | no | `50` | Requests per minute (Anthropic backend only) |
 | `SYNESIS_CODER_MAX_INPUT_TPM` | no | `40000` | Input tokens per minute (Anthropic backend only) |
 | `SYNESIS_CODER_MAX_OUTPUT_TPM` | no | `8000` | Output tokens per minute (Anthropic backend only) |
-| `SYNESIS_CODER_THINKING_BUDGET` | no | `0` | Extended-thinking tokens (Anthropic Claude 4.x only) |
+| `SYNESIS_CODER_THINKING_BUDGET` | no | `0` | `> 0` asks for reasoning. On models with extended thinking (Claude 4.6) it is the token budget; on adaptive-only models (Claude 5.x) it only turns reasoning on, and depth is set by `SYNESIS_CODER_EFFORT` |
+| `SYNESIS_CODER_EFFORT` | no | model default | Anthropic effort: `low`, `medium`, `high`, `xhigh` or `max` (sent as `output_config.effort` when the model accepts it) |
+| `SYNESIS_CODER_THINKING_RESERVE` | no | `8000` | Extra output tokens added to `max_tokens` when the model reasons without a budget (Claude 5.x: Opus 5.5 cannot turn reasoning off), so the answer is not truncated |
+| `SYNESIS_CODER_CONCEPT_REFRESH` | no | `max(10, concurrent)` | `document` mode: chunks per version of the existing-concepts list (each batch sees the concepts of the previous valid batches); `0` keeps one list for the whole document |
 | `SYNESIS_CODER_CRITIQUE_MODEL` | no | falls back to `SYNESIS_CODER_MODEL` | Model for ACT Phase 2 (`critique`) and the critic in `refine` |
 | `SYNESIS_CODER_CRITIQUE_BACKEND` / `_API_URL` / `_API_KEY` | no | inherits primary connection | Separate LLM connection for critique (epistemic independence) |
 | `SYNESIS_CODER_NORMALIZATION_MODEL` | no | falls back to `SYNESIS_CODER_MODEL` | Model for ACT Phase 3 (`normalize`) |

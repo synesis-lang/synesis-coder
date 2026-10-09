@@ -72,10 +72,30 @@ def _field_value(body_lines: list[str], field: str) -> Optional[str]:
     return None
 
 
+def _first_value(body_lines: list[str], fields: list[str]) -> Optional[str]:
+    for field in fields:
+        value = _field_value(body_lines, field)
+        if value:
+            return value
+    return None
+
+
+def items_without_excerpt(content: str, fields: list[str]) -> int:
+    """Quantos ITEMs não têm nenhum dos campos de trecho preenchido.
+
+    Antes eles eram PULADOS em silêncio: com o campo errado (o padrão era
+    `text`, e 25 templates usam `citation`/`trecho`), o relatório dizia "nenhum
+    problema" sem ter verificado nada.
+    """
+    return sum(1 for _b, _l, body in _iter_items(content or "")
+               if not _first_value(body, fields))
+
+
 def check_anchoring(
     content: str,
     bib_content: str,
     field: str = "text",
+    fields: Optional[list[str]] = None,
 ) -> list[AnchorIssue]:
     """Verifica que o trecho de cada ITEM ocorre no abstract do seu bibref.
 
@@ -85,7 +105,9 @@ def check_anchoring(
     Args:
         content: Conteúdo de um arquivo .syn.
         bib_content: Conteúdo do .bib do projeto.
-        field: Campo que carrega o trecho (default "text").
+        field: Campo que carrega o trecho (usado quando `fields` é None).
+        fields: Campos de trecho em ordem de preferência — os QUOTATION do
+            template; o primeiro preenchido em cada ITEM é verificado.
 
     Returns:
         Lista de AnchorIssue, uma por ITEM não ancorado.
@@ -93,11 +115,12 @@ def check_anchoring(
     if not content or not bib_content:
         return []
 
+    campos = fields or [field]
     issues: list[AnchorIssue] = []
     abstract_cache: dict[str, Optional[str]] = {}
 
     for bibref, line_no, body in _iter_items(content):
-        excerpt = _field_value(body, field)
+        excerpt = _first_value(body, campos)
         if not excerpt:
             continue
 
@@ -113,10 +136,24 @@ def check_anchoring(
     return issues
 
 
-def format_report(issues: list[AnchorIssue], total_items: int) -> str:
-    """Formata o relatório de ancoragem para a CLI."""
+def format_report(
+    issues: list[AnchorIssue], total_items: int,
+    without_excerpt: int = 0, fields: Optional[list[str]] = None,
+) -> str:
+    """Formata o relatório de ancoragem para a CLI.
+
+    `without_excerpt` ITEMs não tinham trecho nos `fields` e NÃO foram
+    verificados: o relatório diz isso em vez de contá-los como ancorados.
+    """
+    aviso = ""
+    if without_excerpt:
+        nomes = ", ".join(fields or [])
+        aviso = (f"\n  ⚠ {without_excerpt} de {total_items} ITEM(s) sem trecho em "
+                 f"[{nomes}] — não verificados.")
     if not issues:
-        return f"Ancoragem: {total_items} ITEM(s) verificado(s), nenhum problema."
+        verificados = total_items - without_excerpt
+        return (f"Ancoragem: {verificados} ITEM(s) verificado(s), nenhum problema."
+                + aviso)
 
     rate = len(issues) / total_items if total_items else 0.0
     header = (
@@ -124,4 +161,4 @@ def format_report(issues: list[AnchorIssue], total_items: int) -> str:
         f"({rate:.1%}) com trecho não localizado na fonte:"
     )
     body = "\n".join(f"  {i.to_line()}" for i in issues)
-    return header + "\n" + body
+    return header + "\n" + body + aviso

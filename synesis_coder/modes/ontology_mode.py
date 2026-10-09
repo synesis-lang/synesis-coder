@@ -24,7 +24,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from synesis.ast.nodes import FieldType
+
 from synesis_coder.block_assembler import assemble_ontology
+from synesis_coder.concept_index import _as_list, concept_occurrences, item_field_value
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
@@ -52,16 +55,24 @@ logger = logging.getLogger(__name__)
 def _build_semantic_ctx(code: str, ctx: dict) -> dict:
     """Constrói o contexto semântico de um código para injetar no prompt.
 
-    Coleta dados do corpus já anotado:
-    - Frequência total de uso
+    Coleta dados do corpus já anotado, lendo os campos PELO TIPO declarado no
+    template (nunca pelo nome):
+    - Frequência: ITEMs em que o conceito aparece em qualquer campo CODE/CHAIN
     - Número de fontes bibliográficas distintas
     - Relações no grafo de chains (triples envolvendo o código)
-    - Co-ocorrências (outros códigos no mesmo ITEM)
-    - Exemplos concretos dos primeiros 3 ITEMs
+    - Co-ocorrências: outros conceitos nos mesmos ITEMs
+    - Exemplos concretos: até 3 ITEMs (fontes distintas primeiro), com os
+      campos QUOTATION e MEMO e o valor do campo de termo onde o conceito aparece
+
+    Antes, a função partia do `code_usage` do compilador (só CODE), lia o
+    atributo `source_ref` (o ItemNode tem `bibref`) e procurava atributos
+    `text`/`note`/`chain` que o ItemNode não tem: num projeto só-CHAIN (face85,
+    Social Acceptance) todo conceito saía com frequência 0, 0 fontes e nenhum
+    exemplo — as definições do .syno eram geradas sem evidência.
 
     Args:
         code: Nome do código (ex: "Social_Acceptance").
-        ctx: Contexto do projeto com code_usage, all_triples, etc.
+        ctx: Contexto do projeto (load_project).
 
     Returns:
         dict com chaves: frequency, sources, relations, co_codes, examples.
@@ -70,50 +81,67 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
     if not linked:
         return {"frequency": 0, "sources": 0, "relations": [], "co_codes": [], "examples": []}
 
-    code_usage: Dict[str, list] = linked.code_usage
-    all_triples: List[tuple] = linked.all_triples
+    item_fields: dict = ctx.get("item_fields") or {}
+    occ = ctx.get("_concept_occurrences")
+    if occ is None:
+        occ = concept_occurrences(linked, item_fields)
+        ctx["_concept_occurrences"] = occ  # índice único por sessão (ctx é compartilhado)
 
-    # Frequência e fontes
-    items = code_usage.get(code, [])
-    frequency = len(items)
-    sources = len({getattr(item, "source_ref", None) for item in items} - {None})
+    key = " ".join(str(code).strip().split()).lower()
+    ocorrencias = occ.get(key, [])
+    frequency = len(ocorrencias)
+    sources = len({bibref for bibref, _item, _t in ocorrencias})
 
     # Relações no grafo de chains (triple onde A==code ou B==code)
+    all_triples: List[tuple] = getattr(linked, "all_triples", None) or []
     relations: List[tuple] = [
-        (a, r, b) for a, r, b in all_triples if a == code or b == code
+        (a, r, b) for a, r, b in all_triples
+        if " ".join(str(a).split()).lower() == key or " ".join(str(b).split()).lower() == key
     ]
 
-    # Co-ocorrências: outros códigos que aparecem junto com este em algum ITEM
+    # Co-ocorrências: outros conceitos nos mesmos ITEMs, por frequência
     co_code_counts: Dict[str, int] = {}
-    for item in items:
-        # Tentar derivar codes do mesmo ITEM via all_triples com mesma fonte/bibref
-        item_ref = getattr(item, "source_ref", None)
-        if item_ref is None:
-            continue
-        for other_code, other_items in code_usage.items():
-            if other_code == code:
-                continue
-            for other_item in other_items:
-                if getattr(other_item, "source_ref", None) == item_ref:
-                    co_code_counts[other_code] = co_code_counts.get(other_code, 0) + 1
+    for _bibref, _item, termos in ocorrencias:
+        vistos = set()
+        for pares in termos.values():
+            for conceito, _texto in pares:
+                ck = " ".join(conceito.split()).lower()
+                if ck == key or ck in vistos:
+                    continue
+                vistos.add(ck)
+                co_code_counts[conceito] = co_code_counts.get(conceito, 0) + 1
+    co_codes = sorted(co_code_counts, key=lambda c: (-co_code_counts[c], c))
 
-    # Ordenar co-ocorrências por frequência decrescente
-    co_codes = sorted(co_code_counts, key=lambda c: -co_code_counts[c])
+    # Exemplos: fontes distintas primeiro; campos de evidência e de interpretação
+    # pelo TIPO, e o valor do campo de termo em que o conceito aparece.
+    evid = [n for n, sp in item_fields.items() if sp.type == FieldType.QUOTATION]
+    memo = [n for n, sp in item_fields.items() if sp.type == FieldType.MEMO]
+    escolhidos: list = []
+    vistas: set = set()
+    for bibref, item, termos in ocorrencias:
+        if bibref not in vistas:
+            vistas.add(bibref)
+            escolhidos.append((item, termos))
+        if len(escolhidos) == 3:
+            break
+    for _bibref, item, termos in ocorrencias:
+        if len(escolhidos) >= 3:
+            break
+        if all(item is not e for e, _t in escolhidos):
+            escolhidos.append((item, termos))
 
-    # Exemplos concretos: campos dos primeiros 3 ITEMs
     examples: List[dict] = []
-    for item in items[:3]:
+    for item, termos in escolhidos:
         ex: dict = {}
-        # Coletar campos disponíveis no ItemNode
-        for field_name in ("text", "note", "chain", "topic", "code"):
-            val = getattr(item, field_name, None)
-            if val:
-                ex[field_name] = str(val)[:200]  # truncar para não exceder tokens
-        # Campos adicionais via __dict__ se disponível
-        if not ex and hasattr(item, "__dict__"):
-            for k, v in item.__dict__.items():
-                if v and not k.startswith("_") and k not in ("source_ref",):
-                    ex[k] = str(v)[:200]
+        for name in evid + memo:
+            vals = [str(v) for v in _as_list(item_field_value(item, name)) if v]
+            if vals:
+                ex[name] = " | ".join(vals)[:300]
+        for name, pares in termos.items():
+            textos = list(dict.fromkeys(
+                t for c, t in pares if " ".join(c.split()).lower() == key))
+            if textos:
+                ex[name] = " ; ".join(textos)[:300]
         if ex:
             examples.append(ex)
 

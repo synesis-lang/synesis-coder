@@ -73,10 +73,34 @@ def canonical_tag(name: str) -> str:
     return _ALIASES.get(name, name)
 
 
-def is_meta_tag(name: str) -> bool:
-    """True para tags de diagnóstico/cabeçalho — nunca correções de campo."""
+# Tags reservadas só por COSTUME do modelo (o LLM usa `# $note:` como
+# raciocínio). Quando o template DECLARA um campo com esse nome, a tag é a
+# correção desse campo: 13 templates dos estudos de caso têm MEMO `note`, e as
+# correções dele eram descartadas como metadado.
+YIELDING_TAGS = frozenset({"note"})
+
+
+def meta_tags_for(field_names) -> frozenset:
+    """META_TAGS menos as reservas que cedem a campos declarados no template."""
+    declared = {str(n).lower() for n in (field_names or ())}
+    return META_TAGS - (YIELDING_TAGS & declared)
+
+
+def reserved_field_collisions(field_names) -> list[str]:
+    """Campos do template cujo nome coincide com uma tag que o coder ESCREVE
+    (diagnóstico/cabeçalho): `# $<nome>:` não pode ser correção deles."""
+    declared = {str(n).lower() for n in (field_names or ())}
+    return sorted((META_TAGS - YIELDING_TAGS) & declared)
+
+
+def is_meta_tag(name: str, field_names=None) -> bool:
+    """True para tags de diagnóstico/cabeçalho — nunca correções de campo.
+
+    `field_names`: campos do template; um campo declarado `note` deixa de ser
+    tratado como metadado (ver YIELDING_TAGS).
+    """
     base = name.split(".")[0] if "." in name else name
-    return base in META_TAGS or name.startswith("metrics.")
+    return base in meta_tags_for(field_names) or name.startswith("metrics.")
 
 
 # --- Sensibilidade nomeada ---------------------------------------------------

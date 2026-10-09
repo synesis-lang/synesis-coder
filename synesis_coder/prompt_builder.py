@@ -159,11 +159,13 @@ def build_document_source_values_prompt(
 
     Espelha build_document_values_prompt, mas para o escopo SOURCE: o LLM devolve
     um objeto plano de valores (não envelope `items`), montado por assemble_source.
+    O excerpt chega pronto (abstract do .bib ou início do documento) — o corte de
+    tamanho é decidido em document_mode._build_source_context.
     """
     system_text = _build_values_system_prompt(ctx, scope="source")
     user_text = (
         f"BIBREF: @{bibref}\n"
-        f"<excerpt>{excerpt[:500].strip()}</excerpt>\n\n"
+        f"<excerpt>{excerpt.strip()}</excerpt>\n\n"
         "Return the JSON object of SOURCE field values for this document."
     )
     return [
@@ -329,9 +331,20 @@ def _field_instruction(
     extras: List[str] = []
 
     if spec.type == FieldType.CHAIN:
-        if chain_relations:
+        # As relações vêm do PRÓPRIO campo: `chain_relations` do ctx é só o do
+        # primeiro CHAIN do template — com dois campos, o segundo recebia a lista
+        # do primeiro, e um CHAIN simples recebia relações que não declarou.
+        field_relations = spec.relations
+        if isinstance(field_relations, dict):
+            relations = {str(k): str(v) for k, v in field_relations.items()}
+        elif field_relations:
+            relations = {str(r): "" for r in field_relations}
+        else:
+            relations = {}
+        if relations:
             rel_lines = [
-                f"      {rel}: {desc}" for rel, desc in chain_relations.items()
+                f"      {rel}: {desc}" if desc else f"      {rel}"
+                for rel, desc in relations.items()
             ]
             extras.append(
                 "    Available relations (use only these):\n" + "\n".join(rel_lines)
@@ -411,9 +424,15 @@ def _format_values(spec: FieldSpec) -> List[str]:
     return lines
 
 
-def _build_code_index_section(code_index: dict) -> str:
-    """Gera seção de conceitos existentes para o prompt."""
-    if code_index["empty"]:
+def _build_code_index_section(code_index: dict, framing: str = "extraction") -> str:
+    """Gera seção de conceitos existentes para o prompt.
+
+    Args:
+        framing: "extraction" (instrução de reuso ao gerar — texto inalterado) ou
+            "evaluation" (referência para o crítico JULGAR reuso, sem induzi-lo a
+            gerar conceitos).
+    """
+    if code_index.get("empty", True):
         return ""
 
     codes = code_index["codes"]
@@ -421,6 +440,16 @@ def _build_code_index_section(code_index: dict) -> str:
     groups = [codes[i : i + 10] for i in range(0, len(codes), 10)]
     code_lines = "\n".join("  " + ", ".join(g) for g in groups)
 
+    if framing == "evaluation":
+        return (
+            "EXISTING PROJECT CONCEPTS (reference for judging reuse — do NOT propose "
+            "concepts from this list unless the passage supports them). A correction "
+            "that replaces or adds a concept should use one of these when it covers "
+            "the same meaning; a new concept is legitimate only when none of them "
+            "does AND the passage supports it. Do not force reuse of a concept whose "
+            "meaning differs from what the passage states:\n"
+            + code_lines
+        )
     return (
         "EXISTING PROJECT CONCEPTS (prefer these; "
         "create new ones only when none of the existing ones apply):\n"
@@ -428,12 +457,18 @@ def _build_code_index_section(code_index: dict) -> str:
     )
 
 
-def _build_topic_index_section(topic_index: dict) -> str:
-    """Gera seção de tópicos existentes para o prompt."""
-    if topic_index["empty"]:
+def _build_topic_index_section(topic_index: dict, framing: str = "extraction") -> str:
+    """Gera seção de tópicos existentes para o prompt (ver `framing` acima)."""
+    if topic_index.get("empty", True):
         return ""
 
     topics = topic_index["topics"]
+    if framing == "evaluation":
+        return (
+            "EXISTING TOPICS (reference for judging TOPIC fields — a correction should "
+            "use one of these when it fits):\n"
+            "  " + ", ".join(topics)
+        )
     return (
         "EXISTING TOPICS (for TOPIC fields — prefer these):\n"
         "  " + ", ".join(topics)
@@ -1143,15 +1178,38 @@ def _build_critique_system_prompt(ctx: dict) -> str:
     if criteria:
         parts.append(criteria)
 
+    # Paridade de contexto (Estudo_Assimetria_Contexto_Critique, Fase 3): a
+    # categoria `granularity` pede julgar REUSO no corpus — impossível sem a
+    # lista de conceitos que o extrator viu. Enquadramento de avaliação, não de
+    # extração: o texto "prefer these" induziria o crítico a gerar conceitos.
+    code_section = _build_code_index_section(ctx.get("code_index") or {"empty": True},
+                                             framing="evaluation")
+    if code_section:
+        parts.append(code_section)
+    item_fields: dict = ctx.get("item_fields", {})
+    if any(spec.type == FieldType.TOPIC for spec in item_fields.values()):
+        topic_section = _build_topic_index_section(ctx.get("topic_index") or {"empty": True},
+                                                   framing="evaluation")
+        if topic_section:
+            parts.append(topic_section)
+
     parts.append(_build_critique_output_format(ctx))
 
     return "\n\n".join(parts)
 
 
 def _build_critique_item_criteria(ctx: dict) -> str:
-    """Gera os critérios de avaliação por campo ITEM para o prompt de critique."""
+    """Gera os critérios de avaliação por campo ITEM para o prompt de critique.
+
+    Delega a `_field_instruction`, a MESMA fonte da extração: o crítico passa a
+    ver o que o extrator viu — valores de ENUMERATED/ORDERED, faixa de SCALE,
+    relações de CHAIN, REQUIRED/OPTIONAL e BUNDLE. A versão anterior
+    reimplementava um subconjunto (só guidelines/description) e fazia `continue`
+    num campo sem GUIDELINES: o campo sumia dos critérios em silêncio.
+    """
     item_fields: dict = ctx.get("item_fields", {})
     chain_relations: dict = ctx.get("chain_relations", {})
+    required_item: list = ctx.get("required_item") or []
 
     if not item_fields:
         return ""
@@ -1161,19 +1219,17 @@ def _build_critique_item_criteria(ctx: dict) -> str:
     ]
 
     for name, spec in item_fields.items():
-        guideline = spec.guidelines or spec.description
-        if not guideline:
-            continue
-        lines.append(f"\n  {name} ({spec.type.name}):")
-        lines.append(f"    {guideline}")
+        req_label = "REQUIRED" if name in required_item else "OPTIONAL"
+        lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
+        lines.append(f"    {_field_instruction(name, spec, chain_relations)}")
 
-        if spec.type == FieldType.CHAIN and chain_relations:
-            rel_lines = [
-                f"      {rel}: {desc}" for rel, desc in chain_relations.items()
-            ]
-            lines.append(
-                "    Valid relations:\n" + "\n".join(rel_lines)
-            )
+    bundle_pairs = ctx.get("bundle_pairs") or []
+    if bundle_pairs:
+        bundle_strs = [" + ".join(b) for b in bundle_pairs]
+        lines.append(
+            f"\n  Bundled fields (BUNDLE): {', '.join(bundle_strs)} "
+            "— must appear together or not at all."
+        )
 
     return "\n".join(lines)
 
@@ -1193,7 +1249,7 @@ def _build_critique_output_format(ctx: dict) -> str:
         "",
         "  # $divergence: [0.00-1.00]",
         "  # $reason: [one of the categories below]",
-        "  # $comment: [optional free-text explanation — use this, NOT # $note:]",
+        "  # $comment: [optional free-text explanation — use this for explanations]",
     ]
 
     taxonomy = build_taxonomy_section(item_fields, ctx.get("required_item"))
@@ -1214,9 +1270,16 @@ def _build_critique_output_format(ctx: dict) -> str:
             )
         lines.append("")
         lines.append("IMPORTANT RULES FOR FIELD CORRECTIONS:")
-        lines.append(
-            "  - NEVER output # $note: — use # $comment: for explanations instead."
-        )
+        if "note" in {n.lower() for n in item_fields}:
+            # O template declara um campo `note`: `# $note:` é a correção dele.
+            lines.append(
+                "  - `# $note:` corrects the template field `note` — never use it for "
+                "explanations; use # $comment: instead."
+            )
+        else:
+            lines.append(
+                "  - NEVER output # $note: — use # $comment: for explanations instead."
+            )
         lines.append(
             "  - When a field appears multiple times (e.g. multiple `chain:` lines in one ITEM),\n"
             "    the corrected value must start with the SAME source node as the original chain\n"
@@ -1310,6 +1373,7 @@ def _build_critique_user_message(
 # Fonte única compartilhada com incorporate_mode — antes eram duas constantes
 # literais duplicadas que nada mantinha sincronizadas (Estudo §9.3).
 from synesis_coder.revision_vocab import META_TAGS as _CRITIQUE_META_TAGS  # noqa: E402
+from synesis_coder.revision_vocab import meta_tags_for  # noqa: E402
 
 
 def build_item_refinement_prompt(
@@ -1343,7 +1407,8 @@ def build_item_refinement_prompt(
     """
     system_text = _build_system_prompt(ctx)
     user_text = _build_refinement_user_message(
-        bibref, source_text, prev_item_block, critique_tags
+        bibref, source_text, prev_item_block, critique_tags,
+        field_names=list(ctx.get("item_fields") or {}),
     )
     return [
         {"role": "system", "content": system_text, "cache": True},
@@ -1366,7 +1431,8 @@ def build_item_refinement_values_prompt(
     """
     system_text = _build_values_system_prompt(ctx, scope="item")
     user_text = _build_refinement_user_message(
-        bibref, source_text, prev_item_block, critique_tags, json_mode=True
+        bibref, source_text, prev_item_block, critique_tags, json_mode=True,
+        field_names=list(ctx.get("item_fields") or {}),
     )
     return [
         {"role": "system", "content": system_text, "cache": True},
@@ -1374,7 +1440,7 @@ def build_item_refinement_values_prompt(
     ]
 
 
-def _format_critique_feedback(critique_tags: dict) -> str:
+def _format_critique_feedback(critique_tags: dict, field_names=None) -> str:
     """Serializa as tags do critique em texto legível para o gerador.
 
     Distingue o diagnóstico (reason/reason_detail) das sugestões de campo, que
@@ -1392,9 +1458,10 @@ def _format_critique_feedback(critique_tags: dict) -> str:
         lines.append(f"  detail: {detail}")
 
     field_hints: List[str] = []
+    meta = meta_tags_for(field_names) if field_names is not None else _CRITIQUE_META_TAGS
     for key, value in critique_tags.items():
         base_key = key.split(".")[0]
-        if base_key in _CRITIQUE_META_TAGS or key.startswith("metrics."):
+        if base_key in meta or key.startswith("metrics."):
             continue
         field_hints.append(f"    {base_key}: {value}")
 
@@ -1417,9 +1484,10 @@ def _build_refinement_user_message(
     prev_item_block: str,
     critique_tags: dict,
     json_mode: bool = False,
+    field_names=None,
 ) -> str:
     """Constrói a mensagem dinâmica do usuário para a re-extração."""
-    feedback = _format_critique_feedback(critique_tags)
+    feedback = _format_critique_feedback(critique_tags, field_names)
     closing = (
         "Re-extract this annotation from the SOURCE, correcting ONLY the flagged "
         "field(s). Keep all correct fields unchanged. "

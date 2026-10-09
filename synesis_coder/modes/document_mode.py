@@ -45,6 +45,12 @@ from typing import List, Optional, Tuple
 import synesis
 
 from synesis_coder.block_assembler import assemble_items, assemble_source
+from synesis_coder.concept_index import (
+    concepts_from_item_blocks,
+    has_open_term_fields,
+    refresh_every,
+    with_concepts,
+)
 from synesis_coder.debug_log import DebugRecorder, now_human
 from synesis_coder.llm_client import LLMClient
 from synesis_coder.progress import BatchProgress
@@ -330,13 +336,53 @@ def _split_by_headers(text: str, chunk_size: int, overlap: int) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
+# Tamanho do início do documento usado quando o .bib não tem abstract.
+SOURCE_EXCERPT_CHARS = 500
+
+
+def _clean_bib_value(value: str) -> str:
+    """Valor de campo BibTeX → texto corrido (sem chaves de proteção nem quebras)."""
+    return re.sub(r"\s+", " ", value.replace("{", "").replace("}", "")).strip()
+
+
+def _build_source_context(
+    ctx: dict, bibref: str, document_excerpt: str
+) -> Tuple[str, str]:
+    """Texto que o LLM lê para preencher o SOURCE, e de onde ele veio.
+
+    O abstract descreve objetivo, método, dados e resultados; o início do
+    documento costuma ser só título e introdução. Por isso, se a entrada do
+    .bib tem abstract, o contexto é título + palavras-chave + abstract inteiro.
+    Sem abstract, cai para os primeiros SOURCE_EXCERPT_CHARS do documento.
+
+    Returns:
+        (contexto, origem) — origem é "abstract do .bib" ou "início do documento".
+    """
+    entry = (ctx.get("bib_entries") or {}).get(bibref.lstrip("@").strip().lower()) or {}
+    abstract = _clean_bib_value(entry.get("abstract", ""))
+    if abstract:
+        parts = []
+        title = _clean_bib_value(entry.get("title", ""))
+        if title:
+            parts.append(f"Title: {title}")
+        keywords = _clean_bib_value(entry.get("keywords", ""))
+        if keywords:
+            parts.append(f"Keywords: {keywords}")
+        parts.append(f"Abstract: {abstract}")
+        return "\n".join(parts), "abstract do .bib"
+    return document_excerpt[:SOURCE_EXCERPT_CHARS].strip(), "início do documento"
+
+
 async def _generate_source_block(
     ctx: dict,
     bibref: str,
     document_excerpt: str,
     llm_client: LLMClient,
 ) -> str:
-    """Gera um bloco SOURCE para o documento usando o primeiro trecho como contexto.
+    """Gera um bloco SOURCE para o documento.
+
+    O contexto enviado ao LLM é o abstract do .bib quando existe, senão o início
+    do documento (ver _build_source_context).
 
     Caminho preferencial: JSON + assembler (build_source_schema → call_json_async
     → assemble_source). A moldura determinística do assembler emite indentação
@@ -347,16 +393,19 @@ async def _generate_source_block(
     Args:
         ctx: Contexto do projeto.
         bibref: Referência bibliográfica.
-        document_excerpt: Primeiros parágrafos do documento (contexto).
+        document_excerpt: Primeiro chunk do documento (usado sem abstract no .bib).
         llm_client: Cliente LLM.
 
     Returns:
         String com o bloco SOURCE...END SOURCE.
     """
+    excerpt, origin = _build_source_context(ctx, bibref, document_excerpt)
+    logger.info("SOURCE @%s: contexto = %s (%d chars)", bibref, origin, len(excerpt))
+
     # Caminho JSON + assembler (preferencial)
     try:
         schema = build_source_schema(ctx)
-        messages = build_document_source_values_prompt(ctx, bibref, document_excerpt)
+        messages = build_document_source_values_prompt(ctx, bibref, excerpt)
         data = await llm_client.call_json_async(
             messages, schema, temperature=0.0, context=("source",)
         )
@@ -364,9 +413,6 @@ async def _generate_source_block(
             return assemble_source(ctx, bibref, data)
     except Exception as exc:
         logger.debug("Caminho JSON do SOURCE falhou (%s) — usando texto livre", exc)
-
-    # Limite do excerpt a ~500 chars para não desperdiçar tokens
-    excerpt = document_excerpt[:500].strip()
 
     # Instrução especializada para gerar apenas SOURCE
     source_messages = [
@@ -527,31 +573,51 @@ def _normalize_concept(s: str) -> str:
     return s.strip().lower().replace(" ", "_")
 
 
-def _extract_chain_tuples(item_text: str) -> List[Tuple[str, str, str]]:
-    """Extrai tuplas (A, RELACAO, B) de um bloco ITEM para deduplicação.
+def _extract_chain_tuples(
+    item_text: str, chain_fields: Optional[dict] = None
+) -> List[Tuple[str, str, str]]:
+    """Extrai a primeira tupla (A, RELACAO, B) de cada cadeia do ITEM, para deduplicação.
 
-    Considera apenas o primeiro e último conceito de chains longas (A->R->B->R->C)
-    para capturar o par de início/fim da chain.
+    Args:
+        chain_fields: {nome do campo CHAIN (minúsculo): qualificado?}, pelo TIPO
+            no template. Antes, qualquer campo cujo valor tivesse `->` era lido
+            como cadeia, e toda cadeia como qualificada — numa cadeia simples
+            (`A -> B -> C`), `B` virava relação. None mantém esse comportamento
+            antigo (sem template conhecido).
     """
     tuples: List[Tuple[str, str, str]] = []
-    # Linha de chain: conceito -> RELACAO -> conceito [-> RELACAO -> ...]
     for line in item_text.splitlines():
         line = line.strip()
-        # Procurar padrão "campo: conceito -> REL -> conceito"
-        m = re.match(r"[a-zA-Z_]+\s*:\s*(.+)", line)
-        if m:
-            chain_str = m.group(1)
-            parts = [p.strip() for p in re.split(r"\s*->\s*", chain_str)]
-            if len(parts) >= 3:
-                # Pegar primeira tripla (A, REL, B)
-                a = _normalize_concept(parts[0])
-                rel = parts[1].strip().upper()
-                b = _normalize_concept(parts[2])
-                tuples.append((a, rel, b))
+        m = re.match(r"([a-zA-Z_][\w]*)\s*:\s*(.+)", line)
+        if not m:
+            continue
+        qualified = True
+        if chain_fields is not None:
+            if m.group(1).lower() not in chain_fields:
+                continue
+            qualified = chain_fields[m.group(1).lower()]
+        parts = [p.strip() for p in re.split(r"\s*->\s*", m.group(2))]
+        if qualified and len(parts) >= 3:
+            tuples.append((_normalize_concept(parts[0]), parts[1].strip().upper(),
+                           _normalize_concept(parts[2])))
+        elif not qualified and len(parts) >= 2:
+            tuples.append((_normalize_concept(parts[0]), "", _normalize_concept(parts[1])))
     return tuples
 
 
-def _item_signature(item_text: str, quotation_field: Optional[str] = None) -> frozenset:
+def _chain_fields_of(ctx: dict) -> dict:
+    """{campo CHAIN do ITEM (minúsculo): declara RELATIONS?}, pelo TIPO."""
+    return {
+        name.lower(): bool(getattr(spec, "relations", None))
+        for name, spec in (ctx.get("item_fields") or {}).items()
+        if getattr(getattr(spec, "type", None), "name", "") == "CHAIN"
+    }
+
+
+def _item_signature(
+    item_text: str, quotation_field: Optional[str] = None,
+    chain_fields: Optional[dict] = None,
+) -> frozenset:
     """Gera uma assinatura para um bloco ITEM para deduplicação.
 
     A assinatura inclui:
@@ -578,13 +644,16 @@ def _item_signature(item_text: str, quotation_field: Optional[str] = None) -> fr
             sig.add(f"quotation:{norm}")
 
     # Extrair chains
-    for a, rel, b in _extract_chain_tuples(item_text):
+    for a, rel, b in _extract_chain_tuples(item_text, chain_fields):
         sig.add(f"chain:{a}:{rel}:{b}")
 
     return frozenset(sig)
 
 
-def merge_and_dedup(item_blocks: List[str], quotation_field: Optional[str] = None) -> str:
+def merge_and_dedup(
+    item_blocks: List[str], quotation_field: Optional[str] = None,
+    chain_fields: Optional[dict] = None,
+) -> str:
     """Combina e deduplica blocos ITEM de múltiplos chunks.
 
     Deduplicação por igualdade exata de assinatura normalizada:
@@ -611,7 +680,7 @@ def merge_and_dedup(item_blocks: List[str], quotation_field: Optional[str] = Non
         if not item:
             continue
 
-        sig = _item_signature(item, quotation_field=quotation_field)
+        sig = _item_signature(item, quotation_field=quotation_field, chain_fields=chain_fields)
 
         # Item sem assinatura identificável → sempre preservar
         if not sig:
@@ -807,6 +876,67 @@ def process_document(
     )
 
 
+
+async def _process_chunks_versioned(
+    bibref: str,
+    chunks: List[str],
+    ctx: dict,
+    llm_client: LLMClient,
+    concurrent: int,
+    progress: BatchProgress,
+) -> Tuple[dict, int, int]:
+    """Processa os trechos em LOTES que compartilham uma versão da lista de conceitos.
+
+    Antes, todos os trechos usavam a lista carregada no início e não viam os
+    conceitos uns dos outros. Regra: todo trecho de um lote usa a MESMA versão;
+    só trechos concluídos e VÁLIDOS (após validate_and_fix) entram na versão
+    seguinte — o contexto não depende da ordem em que as chamadas terminam.
+    `SYNESIS_CODER_CONCEPT_REFRESH=0` restaura o comportamento antigo (lote único).
+
+    Returns:
+        (resultados por índice de trecho, total ok, total com falha)
+    """
+    total_chunks = len(chunks)
+    semaphore = asyncio.Semaphore(concurrent)
+    refresh = refresh_every(concurrent)
+    lote = refresh if refresh > 0 else max(1, total_chunks)
+    use_concepts = refresh > 0 and has_open_term_fields(ctx.get("item_fields", {}))
+    ctx_lote = ctx
+
+    results_by_index: dict = {}
+    total_ok = 0
+    total_fail = 0
+    versoes = 0
+    for inicio in range(0, total_chunks, lote):
+        indices = range(inicio, min(total_chunks, inicio + lote))
+        tasks = [
+            _process_chunk(
+                bibref, chunks[i], i, total_chunks, ctx_lote, llm_client, semaphore
+            )
+            for i in indices
+        ]
+        validos: List[str] = []
+        for coro in asyncio.as_completed(tasks):
+            idx, item_blocks, success = await coro
+            results_by_index[idx] = item_blocks
+            if success:
+                total_ok += 1
+                validos.extend(item_blocks)
+            else:
+                total_fail += 1
+            progress.mark(success=success)
+        if use_concepts and validos and inicio + lote < total_chunks:
+            novos = concepts_from_item_blocks(validos, ctx.get("item_fields", {}))
+            if novos:
+                ctx_lote = {**ctx_lote, "code_index": with_concepts(ctx_lote["code_index"], novos)}
+                versoes += 1
+    if versoes:
+        logger.info(
+            "Lista de conceitos atualizada %d vez(es) durante o documento (lotes de %d trechos).",
+            versoes, lote,
+        )
+    return results_by_index, total_ok, total_fail
+
 async def _process_document_async(
     project_path: Path,
     bibref: str,
@@ -873,31 +1003,17 @@ async def _process_document_async(
         ctx, bibref, chunks[0], llm_client
     )
 
-    # 6. Processar chunks em paralelo (com semáforo)
-    semaphore = asyncio.Semaphore(concurrent)
-
-    tasks = [
-        _process_chunk(
-            bibref, chunk, i, total_chunks, ctx, llm_client, semaphore
-        )
-        for i, chunk in enumerate(chunks)
-    ]
-
-    # Coletar resultados mantendo ordem
-    results_by_index: dict = {}
-    total_ok = 0
-    total_fail = 0
-
+    # 6. Processar chunks em paralelo (com semáforo), em LOTES que compartilham
+    #    uma versão da lista de conceitos. Antes, todos os trechos usavam a lista
+    #    carregada no início e não viam os conceitos uns dos outros. Regra: todo
+    #    trecho de um lote usa a MESMA versão; só trechos concluídos e VÁLIDOS
+    #    (após validate_and_fix) entram na versão seguinte — o contexto não
+    #    depende da ordem em que as chamadas terminam.
     progress = BatchProgress(total_chunks, unit="chunk", usage=llm_client.usage)
     progress.start()
-    for coro in asyncio.as_completed(tasks):
-        idx, item_blocks, success = await coro
-        results_by_index[idx] = item_blocks
-        if success:
-            total_ok += 1
-        else:
-            total_fail += 1
-        progress.mark(success=success)
+    results_by_index, total_ok, total_fail = await _process_chunks_versioned(
+        bibref, chunks, ctx, llm_client, concurrent, progress
+    )
 
     # 7. Combinar ITEMs em ordem de chunk
     all_item_blocks: List[str] = []
@@ -917,7 +1033,9 @@ async def _process_document_async(
         ),
         None,
     )
-    combined_items = merge_and_dedup(all_item_blocks, quotation_field=quotation_field)
+    combined_items = merge_and_dedup(
+        all_item_blocks, quotation_field=quotation_field, chain_fields=_chain_fields_of(ctx)
+    )
     final_item_blocks = [
         b.strip()
         for b in re.split(r"\n\n(?=ITEM\s+@)", combined_items)

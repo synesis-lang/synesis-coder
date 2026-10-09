@@ -61,6 +61,11 @@ def _resp(block_types: list[str], stop_reason: str, text: str = "ok") -> MagicMo
     return r
 
 
+def _stream_returns(c: LLMClient, resp: MagicMock) -> None:
+    """Resposta do caminho com streaming (max_tokens acima do limite não-streaming)."""
+    c._client.messages.stream.return_value.__enter__.return_value.get_final_message.return_value = resp
+
+
 # ---------------------------------------------------------------------------
 # 1. Esgotamento de orçamento: exceção tipada + retry
 # ---------------------------------------------------------------------------
@@ -101,10 +106,8 @@ class TestTokenBudgetExhausted:
     def test_call_json_retries_with_larger_budget(self):
         """call_json repete com o dobro do orçamento antes de desistir."""
         c = _client()
-        c._client.messages.create.side_effect = [
-            _resp(["thinking"], "max_tokens"),
-            _resp(["thinking", "text"], "end_turn", '{"items":[]}'),
-        ]
+        c._client.messages.create.side_effect = [_resp(["thinking"], "max_tokens")]
+        _stream_returns(c, _resp(["thinking", "text"], "end_turn", '{"items":[]}'))
 
         with patch.object(c, "supports_json_schema", return_value=True):
             out = c.call_json(
@@ -113,17 +116,17 @@ class TestTokenBudgetExhausted:
             )
 
         assert out == {"items": []}, "retry deveria recuperar o caminho JSON"
-        assert c._client.messages.create.call_count == 2
-        second = c._client.messages.create.call_args_list[1].kwargs
+        # 32.000 passa do limite em que o SDK exige streaming (≈ 21.333): a
+        # re-tentativa vai pelo stream — sem isso, o SDK recusava a chamada.
+        assert c._client.messages.create.call_count == 1
+        second = c._client.messages.stream.call_args.kwargs
         assert second["max_tokens"] == 32000
 
     def test_call_json_gives_up_after_failed_retry(self):
         """Se o retry também falhar, devolve None (fallback preservado)."""
         c = _client()
-        c._client.messages.create.side_effect = [
-            _resp(["thinking"], "max_tokens"),
-            _resp(["thinking"], "max_tokens"),
-        ]
+        c._client.messages.create.side_effect = [_resp(["thinking"], "max_tokens")]
+        _stream_returns(c, _resp(["thinking"], "max_tokens"))
 
         with patch.object(c, "supports_json_schema", return_value=True):
             out = c.call_json(
@@ -137,10 +140,8 @@ class TestTokenBudgetExhausted:
     def test_call_json_async_retries_too(self):
         """O caminho async tem a mesma proteção."""
         c = _client()
-        c._client.messages.create.side_effect = [
-            _resp(["thinking"], "max_tokens"),
-            _resp(["thinking", "text"], "end_turn", '{"items":[]}'),
-        ]
+        c._client.messages.create.side_effect = [_resp(["thinking"], "max_tokens")]
+        _stream_returns(c, _resp(["thinking", "text"], "end_turn", '{"items":[]}'))
 
         with patch.object(c, "supports_json_schema", return_value=True):
             out = asyncio.run(c.call_json_async(
@@ -149,7 +150,8 @@ class TestTokenBudgetExhausted:
             ))
 
         assert out == {"items": []}
-        assert c._client.messages.create.call_count == 2
+        assert c._client.messages.create.call_count == 1
+        assert c._client.messages.stream.call_count == 1
 
 
 # ---------------------------------------------------------------------------

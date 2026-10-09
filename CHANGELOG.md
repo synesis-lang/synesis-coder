@@ -7,6 +7,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.13.0] — 2026-10-09
+
+Compatibilidade com os modelos Claude 5.x e ajustes pequenos para a qualidade do
+vocabulário. Origem: `synesis-planning/synesis-coder/Estudo_Aprimoramento_Coder_Vocabulario.md`
+(Rev. 2), que trocou a síntese/recodificação automática de vocabulário — cara e
+sem ganho de recuperação no face85 — por correções pontuais e verificáveis.
+
+Recomendado com `synesis>=0.13.2`: o compilador passa a coletar campos CHAIN pelo
+tipo, e a lista de conceitos existentes de um template com CHAIN de nome
+arbitrário deixa de sair vazia. Funciona com `synesis>=0.13.1`.
+
+### Fixed — o coder falhava com todo modelo Claude 5.x
+
+Sonnet, Haiku e Opus 5.5 recusam `temperature` com HTTP 400, e a lista de
+omissão só tinha `claude-opus-4-7`: o caminho JSON caía para texto livre, que
+falhava igual. Verificado em chamadas diretas à API em 2026-10-09.
+
+As listas de nomes deram lugar a uma **tabela de capacidades por modelo**
+(`anthropic_caps.py`), refinada pela Models API quando ela responde
+(`capabilities.thinking.types`, `capabilities.effort`, `max_tokens`):
+
+- **`temperature`** só é enviada a quem aceita.
+- **Raciocínio:** sem campo `thinking`, os 5.5 raciocinam por padrão. Quando o
+  chamador não pede raciocínio (caminho JSON, correção), o coder envia o que o
+  modelo aceita para desligá-lo: Sonnet 5.5 → `between_tools`, Haiku 5.5 →
+  `disabled` (com esforço ≤ `high`). **O Opus 5.5 não desliga**: o coder avisa
+  uma vez, mostra no banner e soma uma reserva ao `max_tokens`
+  (`SYNESIS_CODER_THINKING_RESERVE`, padrão 8000), porque os tokens de raciocínio
+  contam no limite e, sem reserva, a resposta seria truncada.
+- **Três controles separados:** modo (pedir raciocínio:
+  `SYNESIS_CODER_THINKING_BUDGET > 0`), **esforço** (novo
+  `SYNESIS_CODER_EFFORT` → `output_config.effort`) e orçamento (só para extended
+  thinking, Claude 4.6). Num modelo só-adaptativo, o orçamento liga o raciocínio
+  e o aviso explica que a profundidade vem do esforço.
+- **Nova tentativa só para o 400 de parâmetro não suportado** (`temperature` ou
+  `thinking.type.X` na mensagem de `invalid_request_error`), uma vez, memorizada
+  para a sessão. Qualquer outro 400 segue como antes.
+- **O registro (`--debug`) grava o que foi ENVIADO** (temperature e max_tokens
+  efetivos), não o que foi pedido.
+- **Streaming quando o `max_tokens` exige.** O SDK recusa chamada não-streaming
+  estimada em mais de 10 min (≈ 21.333 tokens). A reserva do Opus 5.5 com
+  `SYNESIS_CODER_MAX_TOKENS=16000` já passa disso — e a re-tentativa do caminho
+  JSON, que dobra para 32.000, **nunca funcionava** na API real. Acima de 21.000
+  tokens, a chamada usa `messages.stream` (mesmo resultado).
+
+### Changed — o `critique` vê o que o extrator viu (paridade de contexto)
+
+Fase 3 do `Estudo_Assimetria_Contexto_Critique.md`, planejada em 2026-08-18 e
+não implementada até aqui. A categoria `granularity` pede julgar reuso no corpus,
+mas o crítico não recebia a lista de conceitos existentes.
+
+- Os critérios por campo delegam a `_field_instruction` (a mesma fonte da
+  extração): valores de ENUMERATED/ORDERED, faixa de SCALE, relações de CHAIN,
+  REQUIRED/OPTIONAL e BUNDLE. Um campo sem GUIDELINES nem descrição deixava de
+  aparecer nos critérios — agora aparece.
+- A lista de conceitos (e a de tópicos, quando há campo TOPIC no ITEM) entra com
+  **enquadramento de avaliação**: referência para julgar reuso, sem induzir o
+  crítico a gerar conceitos nem a forçar reuso de um conceito inadequado. O
+  texto da extração ("prefer these") fica idêntico.
+
+### Changed — a lista de conceitos existentes em mais modos
+
+- **`dataset`:** carregava o projeto sem anotações e a lista saía vazia. Agora
+  recarrega com as anotações (erros tolerados) quando o template tem CODE/CHAIN
+  abertos no ITEM. Extração determinística (lista fechada) não muda.
+- **`document`:** os trechos usavam a lista do início e não viam os conceitos uns
+  dos outros. Agora rodam em lotes que compartilham uma VERSÃO da lista; só
+  trechos concluídos e válidos (após `validate_and_fix`) entram na versão
+  seguinte, então o contexto não depende da ordem em que as chamadas terminam.
+  `SYNESIS_CODER_CONCEPT_REFRESH` define o lote (padrão `max(10, concurrent)`;
+  `0` restaura a lista única). Cada versão nova quebra o cache de prompt, como
+  já acontece no `abstract` a cada lote.
+
+### Changed — `normalize` lê os campos pelo tipo
+
+Reconhecia os campos de termo pelos nomes `chain` e `code` — no regex e no
+despacho. Agora usa o TIPO declarado no template (CODE/CHAIN abertos no ITEM);
+sem campo de termo no template, cai nos nomes tradicionais.
+
+### Added — candidatos a variante (só diagnóstico)
+
+`variant_candidates.py` aponta rótulos que podem ser variantes por flexão,
+separador ou acento (`questionário`/`questionários`, `Decision-Making`/
+`Decision_Making`) e o `normalize` os lista no inventário e no log. **Nada é
+substituído por essa regra:** ela também junta `pais`/`país`, `avó`/`avô`,
+`economic`/`economics`. A única equivalência que a linguagem garante é a de
+`normalize_code` (caixa e espaços).
+
+### Fixed — campos lidos pelo TIPO do template (auditoria de 2026-10-09)
+
+Nos estudos de caso o QUOTATION se chama `text` em 21 templates, `citation` em
+14 e `trecho` em 11; o MEMO, `memo` em 24 e `note` em 13.
+
+- **Modo `ontology` gerava o `.syno` sem evidência.** `_build_semantic_ctx`
+  partia do `code_usage` (só CODE), lia `item.source_ref` (o ItemNode tem
+  `bibref`) e atributos `text`/`note`/`chain` inexistentes. No face85, todo
+  conceito saía com frequência 0, 0 fontes e nenhum exemplo. Agora lê todos os
+  campos CODE/CHAIN pelo tipo (`concept_index.concept_occurrences`), e os
+  exemplos trazem os campos QUOTATION e MEMO do template e o valor do campo de
+  termo. Medido no face85: `comprometimento_organizacional` passa de 0 para 22
+  ocorrências em 7 fontes, com 3 exemplos.
+- **`critique`/`refine` só achavam o trecho num campo chamado `text`.** Com
+  `citation` ou `trecho`, o crítico perdia o escopo do ITEM e voltava a avaliar
+  contra o abstract inteiro. Agora usa os campos QUOTATION do template
+  (`quotation_fields`).
+- **`anchor` pulava em silêncio o ITEM sem o campo `text`** e relatava "nenhum
+  problema". O padrão agora são os QUOTATION do template (`--field` continua
+  aceito), e o relatório informa quantos ITEMs ficaram sem trecho.
+- **Correções do campo `note` eram descartadas como metadado.** `note` era tag
+  reservada (o modelo a usa como raciocínio). Quando o template DECLARA um campo
+  `note`, a tag passa a ser a correção dele (`meta_tags_for`), no `incorporate` e
+  nas dicas do `refine`, e a instrução do crítico muda de acordo. Campos com nome
+  de tag que o coder escreve (`comment`, `reason`, `model`...) geram aviso.
+- **Relações do 1º CHAIN aplicadas a todos.** `_field_instruction` usa as
+  RELATIONS do próprio campo; um CHAIN simples não recebe relações que não declarou.
+- **`suggest` lia a definição por `ontology_description`.** Agora usa o campo
+  TEXT do ONTOLOGY cuja descrição declara definição (`definition_field`).
+- **Deduplicação do `document` lia como cadeia qualquer valor com `->`.** Agora
+  só os campos CHAIN, cada um no seu modo (simples ou com relações).
+
+Não alterado, por exigir decisão: as instruções de CHAIN/CODE pedem "snake_case"
+e o assembler grava os conceitos de CHAIN em minúsculas, o que contraria
+templates que pedem `Title_Case`.
+
+### Fixed — o SOURCE do modo `document` lia só o início do documento
+
+Com abstract no `.bib`, o contexto do SOURCE passa a ser título + palavras-chave
++ abstract; sem abstract, os primeiros 500 caracteres do documento, como antes.
+O `load_project` expõe `bib_entries` (campos de cada entrada).
+
+### Fixed — raciocínio no OpenRouter
+
+O OpenRouter ignora as chaves do Ollama (`think`, `chat_template_kwargs`): um
+modelo de raciocínio pensava até esgotar o `max_tokens` e caía para texto livre.
+Agora o coder envia `reasoning.effort` no OpenRouter (`none`, ou `low` para
+modelos de raciocínio obrigatório como o gpt-oss);
+`SYNESIS_CODER_REASONING_EFFORT` força um nível. O banner mostra o controle
+efetivamente enviado.
+
+### Testes
+
+Novos: `test_anthropic_caps.py` (34), `test_critique_context_parity.py` (12),
+`test_concept_index.py` (10), `test_variants_and_normalize_by_type.py` (9) e
+`test_fields_by_type.py` (13). Os testes de `_build_semantic_ctx` passam a usar
+ItemNode reais (antes simulavam os atributos inexistentes).
+Os testes de re-tentativa do caminho JSON passam a simular o caminho com streaming.
+
+---
+
 ## [0.12.0] — 2026-09-28
 
 ⚠ **Exige `synesis>=0.13.1`.** Projetos com vários `.bib`, pastas em `INCLUDE`

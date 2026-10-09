@@ -53,6 +53,7 @@ from synesis_coder.prompt_builder import (
     build_item_refinement_prompt,
     build_item_refinement_values_prompt,
 )
+from synesis_coder.revision_vocab import reserved_field_collisions
 from synesis_coder.runtime_info import runtime_banner
 from synesis_coder.schema_builder import build_item_schema
 from synesis_coder.synr_io import _END_ITEM, _ITEM_START, safe_write_output
@@ -432,6 +433,13 @@ async def _process_refine_async(
             "Use --project para especificá-lo."
         )
     ctx = load_project(resolved_project, load_annotations=True)
+    _colisoes = reserved_field_collisions(ctx.get("item_fields") or {})
+    if _colisoes:
+        _log.warning(
+            "Campo(s) do template com nome de tag reservada da revisão: %s. "
+            "`# $<nome>:` é lido como diagnóstico, não como correção desses campos.",
+            ", ".join(_colisoes),
+        )
 
     items_with_bibrefs = _extract_item_blocks_with_bibrefs(syn_content)
     total_items = len(items_with_bibrefs)

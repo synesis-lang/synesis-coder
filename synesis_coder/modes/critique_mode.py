@@ -35,6 +35,7 @@ from synesis_coder.revision_vocab import (
     SCALAR_TAGS,
     SYNR_FORMAT_VERSION,
     canonical_tag,
+    reserved_field_collisions,
     resolve_sensitivity,
 )
 from synesis_coder.runtime_info import runtime_banner
@@ -55,11 +56,9 @@ DEFAULT_SUSPICION_THRESHOLD = 0.20
 # Regex para parse de resposta sem prefixo # $ (fallback)
 _PLAIN_TAG_RE = re.compile(r"^([\w.]+)\s*:\s*(.+)$")
 
-# Regex para extrair o campo text de um bloco ITEM
-_TEXT_FIELD_RE = re.compile(
-    r"^\s*text\s*:\s*(.+?)(?=\n\s*[a-zA-Z_]+\s*:|\n\s*END ITEM|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
+# O trecho do ITEM está nos campos QUOTATION do template — o nome varia por
+# projeto (`text`, `citation`, `trecho`...). O padrão é montado por campo.
+_QUOTE_VALUE = r"^\s*{name}\s*:\s*(.+?)(?=\n\s*[a-zA-Z_]+\s*:|\n\s*END ITEM|\Z)"
 
 # Regex simples para extrair abstract de BibTeX
 _BIB_ABSTRACT_RE = re.compile(
@@ -73,11 +72,28 @@ _BIB_ABSTRACT_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 
-def _extract_item_text(item_block: str) -> str:
-    """Extrai o valor do campo `text` de um bloco ITEM."""
-    m = _TEXT_FIELD_RE.search(item_block)
-    if m:
-        return m.group(1).strip()
+def quotation_fields(ctx: Optional[dict]) -> list[str]:
+    """Campos QUOTATION do ITEM, pelo TIPO no template (ordem do template).
+
+    Sem template conhecido, cai no nome tradicional `text`. Antes, o trecho era
+    procurado só num campo chamado `text`: com `citation` ou `trecho` (25
+    templates dos estudos de caso), o crítico perdia o escopo do ITEM e voltava
+    a avaliar contra o abstract inteiro.
+    """
+    nomes = [
+        name for name, spec in ((ctx or {}).get("item_fields") or {}).items()
+        if getattr(getattr(spec, "type", None), "name", "") == "QUOTATION"
+    ]
+    return nomes or ["text"]
+
+
+def _extract_item_text(item_block: str, ctx: Optional[dict] = None) -> str:
+    """Extrai o trecho do ITEM: o primeiro campo QUOTATION preenchido (pelo tipo)."""
+    for name in quotation_fields(ctx):
+        m = re.search(_QUOTE_VALUE.format(name=re.escape(name)), item_block,
+                      re.MULTILINE | re.DOTALL | re.IGNORECASE)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
     return ""
 
 
@@ -133,7 +149,7 @@ def _get_source_text(item_block: str, bibref: str, ctx: dict) -> str:
         if abstract:
             return abstract
 
-    text_field = _extract_item_text(item_block)
+    text_field = _extract_item_text(item_block, ctx)
     if text_field:
         return text_field
 
@@ -227,7 +243,7 @@ def _build_critique_source(
         ser localizado no abstract; nesse caso o comportamento anterior é
         preservado (abstract inteiro) e o chamador é sinalizado.
     """
-    excerpt = _extract_item_text(item_block)
+    excerpt = _extract_item_text(item_block, ctx)
     bib_content = ctx.get("bib_content") or ""
     abstract = (
         _extract_abstract_from_bib(bibref, bib_content) if bib_content else None
@@ -611,6 +627,13 @@ async def _process_critique_async(
             "Use --project para especificá-lo."
         )
     ctx = load_project(resolved_project, load_annotations=True)
+    _colisoes = reserved_field_collisions(ctx.get("item_fields") or {})
+    if _colisoes:
+        _log.warning(
+            "Campo(s) do template com nome de tag reservada da revisão: %s. "
+            "`# $<nome>:` é lido como diagnóstico, não como correção desses campos.",
+            ", ".join(_colisoes),
+        )
 
     # 3. Extrair blocos ITEM em ordem
     items_with_bibrefs = _extract_item_blocks_with_bibrefs(syn_content)

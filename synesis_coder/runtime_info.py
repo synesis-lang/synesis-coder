@@ -189,7 +189,7 @@ def _safe_version(package: str) -> str:
 
 def build_engine_banner(
     facts, *, concurrent: Optional[int] = None, json_path: bool = True,
-    thinking_off: bool = False,
+    thinking_off: bool | str = False,
 ) -> str:
     """Bloco de abertura descrevendo em que condições a campanha vai rodar.
 
@@ -236,7 +236,7 @@ def build_engine_banner(
         execucao.append(f"concorrência {concurrent}")
     execucao.append("extração JSON" if json_path else "extração texto-livre")
     if thinking_off:
-        execucao.append("raciocínio desativado")
+        execucao.append(thinking_off if isinstance(thinking_off, str) else "raciocínio desativado")
     lines.append(f"  Execução    {' · '.join(execucao)}")
 
     return "\n".join(lines)
@@ -414,20 +414,37 @@ def runtime_banner(
         logger.warning(warning)
 
 
-def _thinking_disabled(llm_client) -> bool:
-    """True quando o coder consegue desativar o raciocínio deste modelo.
+def _thinking_disabled(llm_client) -> str:
+    """Rótulo do controle de raciocínio que o cliente de fato envia ("" se nenhum).
 
-    Lê do próprio `llm_client` quais famílias expõem controle, em vez de
-    repetir a lista: duplicá-la faria o banner divergir do que é de fato
-    enviado — anunciando "raciocínio desativado" onde o modelo continua
-    pensando, ou omitindo onde está desativado.
+    Lê do próprio `llm_client` o que vai no payload, em vez de repetir a lista:
+    duplicá-la faria o banner divergir do que é de fato enviado — anunciando
+    "raciocínio desativado" onde o modelo continua pensando (foi o caso do
+    qwen3.8 no OpenRouter antes de `_reasoning_off_params`), ou omitindo onde
+    está desativado.
     """
-    from synesis_coder.llm_client import _thinking_off_params
+    from synesis_coder.llm_client import _reasoning_off_params, _thinking_off_params
 
     model = getattr(llm_client, "model", "") or ""
     if not isinstance(model, str):
-        return False
-    return bool(_thinking_off_params(model))
+        return ""
+    backend = getattr(llm_client, "backend", "openai")
+    if backend == "anthropic":
+        # Nos Claude 5.x o raciocínio é LIGADO por padrão e nem sempre desliga
+        # (Opus 5.5): o rótulo vem do mesmo plano que monta a requisição.
+        label = getattr(llm_client, "thinking_label", None)
+        try:
+            text = label(False) if callable(label) else ""
+        except Exception:  # noqa: BLE001 — banner é informação, não condição
+            text = ""
+        return text if isinstance(text, str) else ""
+    if backend != "openai":
+        return "raciocínio desativado" if _thinking_off_params(model) else ""
+    params = _reasoning_off_params(model, getattr(llm_client, "_api_url", "") or "")
+    effort = (params.get("reasoning") or {}).get("effort") or params.get("reasoning_effort")
+    if effort and effort != "none":
+        return f"raciocínio mínimo ({effort})"
+    return "raciocínio desativado" if params else ""
 
 
 def print_product_header(quiet: int = 0) -> None:
