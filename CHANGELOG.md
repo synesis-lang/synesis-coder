@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.14.0] — 2026-10-12
+
+Fidelidade ao template: o que o autor escreve no `.synt` passa a chegar ao modelo,
+e o bundle passa a ser estrutural no caminho JSON. Origem:
+`synesis-planning/synesis-coder/Estudo_Fidelidade_Template_Prompt.md` (Rev. 3),
+a partir da revisão do template Social Acceptance 2.0.
+
+### Changed — o bundle é um array de objetos no schema (P11)
+
+O ITEM do schema JSON tinha um valor por campo. O modelo podia omitir um campo do
+bundle (E016) ou pôr relações independentes num único `chain`, com um só `status`
+e um só `note` (E017). E um template não conseguia ter vários bundles no mesmo
+ITEM sem repetir o trecho.
+
+- **Schema:** cada bundle do ITEM vira um array de objetos (`bundles`; com mais
+  de um bundle, `bundles_<1º campo>`), na posição do primeiro campo. Dentro de
+  cada objeto todos os campos são obrigatórios e não-nulos: um objeto é um
+  bundle completo. `OPTIONAL BUNDLE` aceita o array vazio; `BUNDLE` exige ao
+  menos um objeto.
+- **Assembler:** grava os objetos em sequência, na ordem do bundle. Um objeto
+  cujo CHAIN reúne caminhos desconectados é dividido num bundle por caminho, com
+  cópia dos demais campos. JSON no formato plano antigo continua montável.
+- **Prompt:** o contrato do caminho JSON explica o array (um objeto por bundle,
+  um caminho por CHAIN). Substitui a linha "BUNDLE CONSTRAINT".
+- **Medido** (template Social Acceptance com vários bundles por ITEM, 5 abstracts
+  × 3 modelos × 2 rodadas): 30/30 registros OK, **0 correções**, 0 E016/E017,
+  0 trechos duplicados. No teste de viabilidade, a estabilidade entre rodadas
+  subiu nos três modelos (DeepSeek Pro: Jaccard 0,29 → 0,68).
+- **Atenção:** muda o contrato JSON de todo template com bundle. Templates sem
+  bundle (como o face85) mantêm o schema anterior.
+
+### Changed — a correção usa o caminho JSON (P12)
+
+A correção rodava sempre em texto livre e o bloco corrigido perdia as garantias
+do schema.
+
+- `validate_and_fix`/`validate_and_fix_async` aceitam o gancho `json_fix`.
+  `make_json_fix(_async)` monta a correção com o mesmo prompt de valores, o
+  mesmo schema e o mesmo assembler da geração. Sem o gancho, ou se ele falhar,
+  vale a correção em texto livre de antes.
+- Ligado nos modos abstract, dataset, document, refine e item.
+- `call_json`/`call_json_async(correction=True)` contam a chamada como correção.
+
+### Changed — o template chega ao modelo como foi escrito (P1–P5, P7)
+
+- **`OPTIONAL BUNDLE` lido pelo loader** (P1). Antes só `BUNDLE` era lido, e
+  `bundle_pairs` saía vazio. O ctx ganha `required_bundles` e `optional_bundles`.
+- **DESCRIPTION e GUIDELINES juntas** (P2). Antes a DESCRIPTION do campo era
+  descartada sempre que havia GUIDELINES. Agora vai como `Definition: …`, sem
+  repetir quando já está contida nas GUIDELINES. Vale para SOURCE, ITEM,
+  ONTOLOGY, `critique` e o modo document.
+- **Sem regras que não vêm do template** (P3). Saíram do prompt:
+  - a definição fixa de ITEM ("one finding, causal relation or argument");
+  - "Concepts in snake_case";
+  - a sintaxe com setas no caminho JSON, que pede hops;
+  - "with a note indicating this";
+  - a referência a `EXISTING PROJECT CONCEPTS` quando a lista não é enviada.
+- **Campos do bundle na ordem do BUNDLE** (P4), no prompt, no schema e no `.syn`,
+  em vez da ordem das definições FIELD. O dado não muda: o compilador associa os
+  campos do bundle por índice.
+- **Recuo uniforme das GUIDELINES no prompt** (P5).
+- **`ontology --prompt-only` com a evidência real** (P7). Antes imprimia
+  "0 occurrence(s)" sempre; agora usa o contexto do primeiro conceito ou
+  declara a omissão.
+
+### Added — aviso de linha de GUIDELINES alterada pelo compilador (P8)
+
+Novo `template_lint.py`. O parser do compilador altera a palavra-chave no início
+de uma linha de GUIDELINES (`Include` → `INCLUDE`, `bundles` → `BUNDLE s`,
+`Formativo` → `FORMAT ivo`) e listas numeradas (`1.` → `1 .`). O coder avisa,
+uma vez por template, quais linhas chegam diferentes. Não altera nenhuma saída.
+No face85, aponta 6 linhas do campo `aspect`.
+
+### Tests
+
+- `tests/test_template_fidelity.py`: 34 testes sobre um projeto mínimo real.
+- `test_schema_builder.py` e `test_abstract_mode.py` ajustados ao bundle dentro
+  do array.
+
+### Known issues
+
+- **Sonnet 5.5 pelo OpenRouter exige raciocínio.** O coder o desativa no caminho
+  JSON, o OpenRouter responde HTTP 400 ("Reasoning is mandatory for this
+  endpoint") e a extração cai para texto livre, sem as garantias do schema. O
+  único sinal é `fallbacks` no resumo da campanha. Contorno: definir
+  `SYNESIS_CODER_REASONING_EFFORT=low`. O Haiku 5.5 e o DeepSeek não são afetados.
+
+---
+
 ## [0.13.0] — 2026-10-09
 
 Compatibilidade com os modelos Claude 5.x e ajustes pequenos para a qualidade do

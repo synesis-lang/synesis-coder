@@ -101,6 +101,9 @@ def load_project(
             "required_item"       — List[str]: campos REQUIRED no SCOPE ITEM
             "required_source"     — List[str]: campos REQUIRED no SCOPE SOURCE
             "bundle_pairs"        — List[Tuple[str,...]]: bundles do SCOPE ITEM
+                                    (BUNDLE + OPTIONAL BUNDLE)
+            "required_bundles"    — List[Tuple[str,...]]: só BUNDLE (SCOPE ITEM)
+            "optional_bundles"    — List[Tuple[str,...]]: só OPTIONAL BUNDLE (SCOPE ITEM)
             "code_index"          — dict: {"codes", "stats", "empty"}
             "topic_index"         — dict: {"topics", "topic_members", "empty"}
             "ontology_index"      — Dict[str, OntologyNode]
@@ -181,6 +184,11 @@ def load_project(
 
     field_specs = result.template.field_specs
 
+    # Avisos sobre o template (não alteram nada; uma vez por template).
+    from synesis_coder.template_lint import warn_template_issues
+
+    warn_template_issues(template_path.name, template_content, field_specs)
+
     # Separar campos por escopo
     source_fields = {
         name: spec
@@ -221,8 +229,25 @@ def load_project(
     required_ontology: List[str] = list(
         result.template.required_fields.get(Scope.ONTOLOGY, [])
     )
-    bundle_pairs: List[Tuple[str, ...]] = list(
-        result.template.bundled_fields.get(Scope.ITEM, [])
+    # BUNDLE e OPTIONAL BUNDLE vivem em estruturas distintas do TemplateNode
+    # (`bundled_fields` e `optional_bundles`). Ler só a primeira deixava
+    # `bundle_pairs` vazio para templates com OPTIONAL BUNDLE, e o prompt nunca
+    # dizia que aqueles campos andam juntos (Estudo_Paridade_Bundle_Schema §3).
+    required_bundles: List[Tuple[str, ...]] = [
+        tuple(b) for b in result.template.bundled_fields.get(Scope.ITEM, [])
+    ]
+    optional_bundles: List[Tuple[str, ...]] = [
+        tuple(b)
+        for b in getattr(result.template, "optional_bundles", {}).get(Scope.ITEM, [])
+    ]
+    bundle_pairs: List[Tuple[str, ...]] = required_bundles + optional_bundles
+
+    # Campos de um bundle passam a sair juntos e na ordem declarada no BUNDLE —
+    # no prompt, no schema e no .syn —, em vez da ordem das definições FIELD.
+    source_fields = _order_by_bundles(source_fields, _scope_bundles(result.template, Scope.SOURCE))
+    item_fields = _order_by_bundles(item_fields, bundle_pairs)
+    ontology_fields = _order_by_bundles(
+        ontology_fields, _scope_bundles(result.template, Scope.ONTOLOGY)
     )
 
     # Índices derivados do linked_project
@@ -254,6 +279,8 @@ def load_project(
         "required_source": required_source,
         "required_ontology": required_ontology,
         "bundle_pairs": bundle_pairs,
+        "required_bundles": required_bundles,
+        "optional_bundles": optional_bundles,
         "code_index": code_index,
         "topic_index": topic_index,
         "ontology_index": ontology_index,
@@ -553,6 +580,42 @@ def _load_dataset(
                     )
                 index[key] = record
     return index
+
+
+def _scope_bundles(template, scope) -> List[Tuple[str, ...]]:
+    """Bundles (BUNDLE + OPTIONAL BUNDLE) declarados para um escopo."""
+    bundles = list(template.bundled_fields.get(scope, []))
+    bundles += list(getattr(template, "optional_bundles", {}).get(scope, []))
+    return [tuple(b) for b in bundles]
+
+
+def _order_by_bundles(fields: dict, bundles: List[Tuple[str, ...]]) -> dict:
+    """Reordena os campos para que os de um bundle fiquem juntos, na ordem do BUNDLE.
+
+    Os demais campos mantêm a ordem das definições FIELD. O bundle entra na
+    posição do primeiro dos seus campos a ser definido. Sem isso, um template
+    que define `note` antes de `chain` recebia `note` antes de `chain` no
+    prompt e no .syn, contra a ordem declarada em `BUNDLE chain, status, note`.
+
+    A reordenação não altera o dado: o compilador associa os campos de um
+    bundle por índice (`ItemNode.note_chain_pairs` usa `zip`) e o validador
+    confere só presença e contagem.
+    """
+    if not bundles:
+        return fields
+    bundle_of = {name: b for b in bundles for name in b}
+    ordered: dict = {}
+    for name, spec in fields.items():
+        if name in ordered:
+            continue
+        bundle = bundle_of.get(name)
+        if bundle is None:
+            ordered[name] = spec
+            continue
+        for member in bundle:
+            if member in fields and member not in ordered:
+                ordered[member] = fields[member]
+    return ordered
 
 
 def _build_code_index(linked) -> dict:

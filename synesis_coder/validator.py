@@ -11,7 +11,7 @@ determinístico quando temperature=0:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Awaitable, Callable, List, Optional, Tuple
 
 import synesis
 
@@ -109,25 +109,111 @@ def _accept_fix(previous: str, candidate: str) -> tuple[str, bool]:
     return candidate, True
 
 
-# NOTA — por que o validator NÃO passa `schema=` ao fix
+# CORREÇÃO PELO CAMINHO JSON (`json_fix`)
 #
-# `fix()`/`fix_async()` aceitam `schema=`, mas este módulo deliberadamente não
-# o usa. O motivo é um descasamento de formato, não um esquecimento:
+# `fix()`/`fix_async()` devolvem TEXTO Synesis: a correção roda em texto livre
+# e o bloco corrigido perde as garantias do schema (enum, bundle completo,
+# campos conhecidos). Passar `schema=` a eles não resolve: o retorno seria JSON
+# de VALORES, que só vira bloco depois do `block_assembler`.
 #
-#   - Com schema, o modelo devolve JSON de VALORES ({"items": [...]}), que só
-#     vira bloco Synesis depois de passar pelo `block_assembler`.
-#   - O laço abaixo trata o retorno do fix como TEXTO Synesis: aplica
-#     `_extract_item_blocks`/`_extract_annotation_blocks` e entrega direto a
-#     `synesis.load()`.
-#
-# Passar o schema aqui faria `_extract_*` devolver string vazia e o JSON cru
-# seguir para o compilador, que falharia em toda tentativa — trocando uma
-# correção degradada por uma correção impossível.
-#
-# Fechar o defeito irmão (fix perde as garantias estruturais do schema) exige
-# montar um caminho JSON completo para a correção: prompt de valores + envio do
-# schema + `block_assembler` no retorno. É mudança de escopo maior, fora desta
-# correção. Ver Planning/Estudo_Fix_Perde_System_Prompt.md §6.2.
+# Por isso a correção JSON entra como um gancho: o modo que gerou pelo caminho
+# JSON passa `json_fix(saida_anterior, erros, temperatura) -> texto | None`,
+# montado com `make_json_fix_async`/`make_json_fix` a partir do MESMO prompt de
+# valores, do MESMO schema e do assembler. O gancho devolve o texto já montado;
+# None (backend sem schema, JSON inválido, envelope incompleto) cai na correção
+# em texto livre de antes. Sem o gancho, o comportamento é o anterior.
+# Ver Estudo_Fidelidade_Template_Prompt §4.2 (P12).
+
+JsonFix = Callable[[str, str, float], Optional[str]]
+JsonFixAsync = Callable[[str, str, float], Awaitable[Optional[str]]]
+
+_JSON_FIX_REQUEST = (
+    "\n\nA previous answer for this input produced the annotations below, which "
+    "the compiler rejected.\n"
+    "PREVIOUS ANNOTATIONS:\n```\n{previous}\n```\n\n"
+    "COMPILER ERRORS:\n{errors}\n\n"
+    "Return the corrected JSON of values for this input: keep every annotation "
+    "that was valid and fix only what the errors point to."
+)
+
+
+def json_fix_messages(messages: List[dict], previous: str, errors: str) -> List[dict]:
+    """Mensagens da correção JSON: as da geração + o pedido de correção.
+
+    O system é o da geração, byte a byte (o prefixo casa com o cache). O pedido
+    vai ao fim da última mensagem do usuário, que mantém o texto-fonte.
+    """
+    fixed = [dict(m) for m in messages]
+    fixed[-1]["content"] = fixed[-1]["content"] + _JSON_FIX_REQUEST.format(
+        previous=previous, errors=errors,
+    )
+    fixed[-1]["cache"] = False
+    return fixed
+
+
+def make_json_fix(
+    llm_client: "LLMClient",
+    messages: List[dict],
+    schema: dict,
+    assemble: Callable[[dict], str],
+) -> JsonFix:
+    """Gancho síncrono de correção JSON (modo item). Ver nota acima."""
+
+    def _fix(previous: str, errors: str, temperature: float) -> Optional[str]:
+        data = llm_client.call_json(
+            json_fix_messages(messages, previous, errors), schema,
+            temperature=temperature, correction=True,
+        )
+        return assemble(data) if data is not None else None
+
+    return _fix
+
+
+def make_json_fix_async(
+    llm_client: "LLMClient",
+    messages: List[dict],
+    schema: dict,
+    assemble: Callable[[dict], str],
+    context: Optional[tuple] = None,
+) -> JsonFixAsync:
+    """Gancho assíncrono de correção JSON (modos de lote). Ver nota acima."""
+
+    async def _fix(previous: str, errors: str, temperature: float) -> Optional[str]:
+        data = await llm_client.call_json_async(
+            json_fix_messages(messages, previous, errors), schema,
+            temperature=temperature, context=context, correction=True,
+        )
+        return assemble(data) if data is not None else None
+
+    return _fix
+
+
+def _run_json_fix(
+    json_fix: Optional[JsonFix], previous: str, errors: str, temperature: float,
+) -> Optional[str]:
+    """Executa o gancho síncrono; qualquer falha devolve None (texto livre)."""
+    if json_fix is None:
+        return None
+    try:
+        candidate = json_fix(previous, errors, temperature)
+    except Exception as exc:  # noqa: BLE001 — a correção em texto livre segue
+        _log.warning("Correção pelo caminho JSON falhou (%s) — usando texto livre.", exc)
+        return None
+    return candidate if candidate and candidate.strip() else None
+
+
+async def _run_json_fix_async(
+    json_fix: Optional[JsonFixAsync], previous: str, errors: str, temperature: float,
+) -> Optional[str]:
+    """Executa o gancho assíncrono; qualquer falha devolve None (texto livre)."""
+    if json_fix is None:
+        return None
+    try:
+        candidate = await json_fix(previous, errors, temperature)
+    except Exception as exc:  # noqa: BLE001 — a correção em texto livre segue
+        _log.warning("Correção pelo caminho JSON falhou (%s) — usando texto livre.", exc)
+        return None
+    return candidate if candidate and candidate.strip() else None
 
 
 def validate_and_fix(
@@ -137,8 +223,12 @@ def validate_and_fix(
     annotation_key: str = "output.syn",
     max_tries: int = 3,
     scope: str = "item",
+    json_fix: Optional[JsonFix] = None,
 ) -> Tuple[str, bool]:
     """Valida output via synesis.load(). Se inválido, solicita correção ao LLM.
+
+    Com `json_fix` (ver `make_json_fix`), cada correção é pedida primeiro pelo
+    caminho JSON, com o schema da geração; o texto livre fica de reserva.
 
     Ciclo:
         1. Valida output atual com synesis.load()
@@ -183,12 +273,14 @@ def validate_and_fix(
             temperature = CORRECTION_TEMPERATURES[
                 min(attempt, len(CORRECTION_TEMPERATURES) - 1)
             ]
-            raw = _strip_markdown_fences(
-                llm_client.fix(
-                    output, last_errors, temperature=temperature, system=fix_system,
+            candidate = _run_json_fix(json_fix, output, last_errors, temperature)
+            if candidate is None:
+                raw = _strip_markdown_fences(
+                    llm_client.fix(
+                        output, last_errors, temperature=temperature, system=fix_system,
+                    )
                 )
-            )
-            candidate = _extract_item_blocks(raw) or raw
+                candidate = _extract_item_blocks(raw) or raw
             output, accepted = _accept_fix(output, candidate)
             if not accepted:
                 _log.warning(_FIX_REJECTED_MSG)
@@ -214,12 +306,15 @@ def validate_and_fix(
         temperature = CORRECTION_TEMPERATURES[
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
-        raw = _strip_markdown_fences(
-            llm_client.fix(
-                output, _fix_diagnostics(result), temperature=temperature, system=fix_system,
+        diagnostics = _fix_diagnostics(result)
+        candidate = _run_json_fix(json_fix, output, diagnostics, temperature)
+        if candidate is None:
+            raw = _strip_markdown_fences(
+                llm_client.fix(
+                    output, diagnostics, temperature=temperature, system=fix_system,
+                )
             )
-        )
-        candidate = _extract_item_blocks(raw) or raw
+            candidate = _extract_item_blocks(raw) or raw
         output, accepted = _accept_fix(output, candidate)
         if not accepted:
             _log.warning(_FIX_REJECTED_MSG)
@@ -237,11 +332,13 @@ async def validate_and_fix_async(
     recorder: "DebugRecorder | None" = None,
     context: tuple | None = None,
     scope: str = "abstract",
+    json_fix: Optional[JsonFixAsync] = None,
 ) -> Tuple[str, bool]:
     """Versão assíncrona de validate_and_fix() para modos de lote.
 
     Valida SOURCE + ITEM blocks via synesis.load(). Se inválido,
-    solicita correção ao LLM usando fix_async().
+    solicita correção ao LLM — pelo caminho JSON quando o modo passa `json_fix`
+    (ver `make_json_fix_async`), com fix_async() em texto livre de reserva.
 
     Args:
         output: Texto Synesis gerado pelo LLM (SOURCE + ITEMs).
@@ -285,13 +382,15 @@ async def validate_and_fix_async(
             temperature = CORRECTION_TEMPERATURES[
                 min(attempt, len(CORRECTION_TEMPERATURES) - 1)
             ]
-            raw = _strip_markdown_fences(
-                await llm_client.fix_async(
-                    output, last_errors, temperature=temperature, context=context,
-                    system=fix_system,
+            candidate = await _run_json_fix_async(json_fix, output, last_errors, temperature)
+            if candidate is None:
+                raw = _strip_markdown_fences(
+                    await llm_client.fix_async(
+                        output, last_errors, temperature=temperature, context=context,
+                        system=fix_system,
+                    )
                 )
-            )
-            candidate = _extract_annotation_blocks(raw) or raw
+                candidate = _extract_annotation_blocks(raw) or raw
             output, accepted = _accept_fix(output, candidate)
             if not accepted:
                 _log.warning(_FIX_REJECTED_MSG)
@@ -325,13 +424,16 @@ async def validate_and_fix_async(
         temperature = CORRECTION_TEMPERATURES[
             min(attempt, len(CORRECTION_TEMPERATURES) - 1)
         ]
-        raw = _strip_markdown_fences(
-            await llm_client.fix_async(
-                output, _fix_diagnostics(result), temperature=temperature, context=context,
-                system=fix_system,
+        diagnostics = _fix_diagnostics(result)
+        candidate = await _run_json_fix_async(json_fix, output, diagnostics, temperature)
+        if candidate is None:
+            raw = _strip_markdown_fences(
+                await llm_client.fix_async(
+                    output, diagnostics, temperature=temperature, context=context,
+                    system=fix_system,
+                )
             )
-        )
-        candidate = _extract_annotation_blocks(raw) or raw
+            candidate = _extract_annotation_blocks(raw) or raw
         output, accepted = _accept_fix(output, candidate)
         if not accepted:
             _log.warning(_FIX_REJECTED_MSG)

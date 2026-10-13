@@ -323,7 +323,15 @@ class TestAbstractSchema:
         assert items_schema["type"] == "array"
         assert items_schema["minItems"] == 1
         item_props = items_schema["items"]["properties"]
-        assert set(item_props) == set(ctx["item_fields"])
+        # Campos de bundle vivem dentro do array do bundle (P11); juntos, ITEM
+        # e bundle cobrem exatamente os campos do template.
+        from synesis_coder.schema_builder import bundle_groups
+
+        covered = set(item_props)
+        for key, members, _required in bundle_groups(ctx):
+            covered.discard(key)
+            covered |= set(item_props[key]["items"]["properties"])
+        assert covered == set(ctx["item_fields"])
 
     def test_additional_properties_false_everywhere(self):
         from synesis_coder.project_loader import load_project

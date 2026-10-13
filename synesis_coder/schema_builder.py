@@ -28,7 +28,7 @@ Generated conforming to: Synesis Specification v1.1
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from synesis.ast.nodes import FieldSpec, FieldType
 
@@ -47,6 +47,54 @@ _STRING_TYPES = frozenset(
 _ARITY_MIN = re.compile(r">=\s*(\d+)")
 
 
+# Chave JSON (interna, nunca escrita no .syn) do array de um bundle do ITEM.
+BUNDLE_KEY = "bundles"
+
+
+def bundle_groups(ctx: dict) -> List[Tuple[str, Tuple[str, ...], bool]]:
+    """Bundles do escopo ITEM como grupos do schema: (chave JSON, campos, obrigatório).
+
+    Cada bundle vira, no schema, um array de objetos em que cada objeto traz
+    TODOS os campos do bundle. Isso fecha por construção a presença parcial
+    (E016) e a contagem desigual (E017): não há como devolver um `chain` sem o
+    seu `status` e o seu `note`. Ver Estudo_Fidelidade_Template_Prompt §4.1 —
+    no teste de viabilidade o E016 do Sonnet foi a zero e a estabilidade entre
+    rodadas subiu nos três modelos.
+
+    A chave é `bundles` quando o template tem um só bundle; com vários, recebe
+    o nome do primeiro campo (`bundles_chain`). Um campo do template com o
+    mesmo nome desloca a chave com `_`.
+
+    `bundle_pairs` sem `required_bundles`/`optional_bundles` (ctx montado à mão,
+    anterior à leitura de OPTIONAL BUNDLE) é tratado como BUNDLE obrigatório —
+    era o que `bundle_pairs` continha antes.
+    """
+    item_fields: dict = ctx.get("item_fields") or {}
+    required = [tuple(b) for b in ctx.get("required_bundles") or []]
+    optional = [tuple(b) for b in ctx.get("optional_bundles") or []]
+    if not required and not optional:
+        required = [tuple(b) for b in ctx.get("bundle_pairs") or []]
+    declared = [(b, True) for b in required] + [(b, False) for b in optional]
+
+    taken = set(item_fields)
+    groups: List[Tuple[str, Tuple[str, ...], bool]] = []
+    for bundle, is_required in declared:
+        members = tuple(
+            f for f in bundle
+            if f in item_fields
+            and getattr(item_fields[f], "value_origin", "document")
+            not in ("bibliography", "dataset")
+        )
+        if not members:
+            continue
+        key = BUNDLE_KEY if len(declared) == 1 else f"{BUNDLE_KEY}_{members[0]}"
+        while key in taken:
+            key = "_" + key
+        taken.add(key)
+        groups.append((key, members, is_required))
+    return groups
+
+
 def build_abstract_schema(ctx: dict) -> dict:
     """Monta o JSON Schema do envelope SOURCE + items para o modo abstract.
 
@@ -54,7 +102,9 @@ def build_abstract_schema(ctx: dict) -> dict:
     em uma única chamada. O assembler reconstrói os dois blocos separadamente.
     """
     source_object = _scope_object_schema(ctx["source_fields"], ctx.get("required_source", []))
-    item_object = _scope_object_schema(ctx["item_fields"], ctx["required_item"])
+    item_object = _scope_object_schema(
+        ctx["item_fields"], ctx["required_item"], bundle_groups(ctx)
+    )
     return {
         "type": "object",
         "properties": {
@@ -77,7 +127,9 @@ def build_item_schema(ctx: dict) -> dict:
     cada `obj` segue o schema de um ITEM. O caminho de 1 ITEM (modo item) é o
     caso degenerado N=1.
     """
-    item_object = _scope_object_schema(ctx["item_fields"], ctx["required_item"])
+    item_object = _scope_object_schema(
+        ctx["item_fields"], ctx["required_item"], bundle_groups(ctx)
+    )
     return {
         "type": "object",
         "properties": {
@@ -161,8 +213,18 @@ def _nullable(fragment: dict) -> dict:
     return out
 
 
-def _scope_object_schema(fields: dict, required: list) -> dict:
+def _scope_object_schema(
+    fields: dict,
+    required: list,
+    groups: Optional[List[Tuple[str, Tuple[str, ...], bool]]] = None,
+) -> dict:
     """Constrói o schema de um objeto (ITEM ou SOURCE) a partir dos seus campos.
+
+    BUNDLES (`groups`, de `bundle_groups`): os campos de um bundle saem do
+    objeto e entram num array de objetos, na posição do primeiro campo do
+    bundle. Dentro de cada objeto do bundle todos os campos são obrigatórios e
+    não-nulos — um objeto é um bundle completo. O array pode vir vazio num
+    OPTIONAL BUNDLE; num BUNDLE obrigatório exige ao menos um objeto.
 
     Campos com origem-de-valor externa (ON BIBLIOGRAPHY / ON DATASET) são
     EXCLUÍDOS do schema: o compilador os resolve do .bib/TOML, então o LLM não
@@ -189,9 +251,18 @@ def _scope_object_schema(fields: dict, required: list) -> dict:
         if getattr(spec, "value_origin", "document") not in ("bibliography", "dataset")
     }
     required_set = {name for name in required if name in gen_fields}
+    group_of = {
+        member: group for group in (groups or []) for member in group[1]
+    }
 
     properties: dict = {}
     for name, spec in gen_fields.items():
+        group = group_of.get(name)
+        if group is not None:
+            key, members, is_required = group
+            if key not in properties:
+                properties[key] = _bundle_array_schema(gen_fields, members, is_required)
+            continue
         fragment = field_to_schema(spec)
         properties[name] = fragment if name in required_set else _nullable(fragment)
 
@@ -204,6 +275,21 @@ def _scope_object_schema(fields: dict, required: list) -> dict:
         # Ordem estável e determinística: segue a ordem dos campos do template.
         schema["required"] = list(properties.keys())
     return schema
+
+
+def _bundle_array_schema(fields: dict, members: Tuple[str, ...], is_required: bool) -> dict:
+    """Array de objetos-bundle: cada objeto traz todos os campos do bundle."""
+    bundle_object = {
+        "type": "object",
+        "properties": {name: field_to_schema(fields[name]) for name in members},
+        "required": list(members),
+        "additionalProperties": False,
+    }
+    array_schema: dict = {"type": "array", "items": bundle_object}
+    if is_required:
+        # minItems só aceita 0 ou 1 no structured outputs da Anthropic.
+        array_schema["minItems"] = 1
+    return array_schema
 
 
 def field_to_schema(spec: FieldSpec) -> dict:

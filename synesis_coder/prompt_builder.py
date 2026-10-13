@@ -84,8 +84,7 @@ def _build_system_prompt(ctx: dict) -> str:
             f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions, "
             f"TOPIC categories) must be written in {lang}.\n"
             "Exceptions: QUOTATION blocks preserve the original language of the source "
-            "text. Concept names in CHAIN fields remain in the language used in "
-            "EXISTING PROJECT CONCEPTS below."
+            "text." + _concepts_language_clause(ctx)
         )
 
     # Contexto metodológico do projeto
@@ -113,6 +112,53 @@ def _build_system_prompt(ctx: dict) -> str:
     parts.append(_build_output_format_section(ctx))
 
     return "\n\n".join(parts)
+
+
+def _bundle_contract(ctx: dict) -> str:
+    """Linhas do contrato JSON para os bundles do ITEM (uma por bundle).
+
+    O schema (`schema_builder.bundle_groups`) põe os campos de cada bundle num
+    array de objetos. O contrato diz ao modelo onde ficam esses campos e que um
+    objeto é UM bundle completo — inclusive que um CHAIN do bundle é um único
+    caminho, com relações independentes em objetos separados.
+    """
+    from synesis_coder.schema_builder import bundle_groups
+
+    item_fields: dict = ctx.get("item_fields") or {}
+    lines: List[str] = []
+    for key, members, is_required in bundle_groups(ctx):
+        line = (
+            f"\n- Fields {', '.join(members)} form a BUNDLE: put them ONLY inside the "
+            f"`{key}` array of each ITEM, one object per bundle, each object holding "
+            f"ALL of {', '.join(members)}. "
+        )
+        line += (
+            "Each ITEM needs at least one object."
+            if is_required else
+            "Use an empty array when the ITEM has none."
+        )
+        chains = [m for m in members if getattr(item_fields.get(m), "type", None) == FieldType.CHAIN]
+        if chains:
+            line += (
+                f" Each object's {chains[0]} is ONE path; put independent relations "
+                "in separate objects."
+            )
+        lines.append(line)
+    return "".join(lines)
+
+
+def _concepts_language_clause(ctx: dict) -> str:
+    """Frase de idioma dos conceitos — só quando a lista de conceitos é enviada.
+
+    Remetia a "EXISTING PROJECT CONCEPTS below" mesmo quando essa seção não
+    existia (projeto sem anotações), apontando o modelo para algo ausente.
+    """
+    if ctx.get("code_index", {}).get("empty", True):
+        return ""
+    return (
+        " Concept names in CHAIN fields remain in the language used in "
+        "EXISTING PROJECT CONCEPTS below."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +248,13 @@ def _build_values_system_prompt(ctx: dict, scope: str) -> str:
             "OUTPUT CONTRACT:\n"
             "- Return ONLY a JSON object that conforms to the provided schema\n"
             "- The JSON has an `items` array; each element holds the field VALUES of one "
-            "annotation (one finding, causal relation or argument)\n"
+            "annotation, as defined by the ITEM FIELDS below\n"
             "- Provide values only — do NOT write Synesis block keywords, field names with "
             "colons, indentation, or chain arrows. The system assembles the block.\n"
             "- For CHAIN fields, return a list of hops; each hop is "
             "{\"source\": concept, \"relation\": one allowed relation, \"target\": concept}\n"
             "- Omit OPTIONAL fields you have no content for; include all REQUIRED fields"
+            + _bundle_contract(ctx)
         )
 
     lang = ctx.get("output_language")
@@ -215,8 +262,9 @@ def _build_values_system_prompt(ctx: dict, scope: str) -> str:
         parts.append(
             f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT, TOPIC) must be "
             f"written in {lang}. "
-            "QUOTATION values preserve the source language. Chain concepts stay in the "
-            "language of EXISTING PROJECT CONCEPTS below."
+            "QUOTATION values preserve the source language."
+            # No escopo SOURCE a lista de conceitos não é enviada.
+            + (_concepts_language_clause(ctx) if scope != "source" else "")
         )
 
     if ctx.get("project_description"):
@@ -225,12 +273,12 @@ def _build_values_system_prompt(ctx: dict, scope: str) -> str:
     if scope == "source":
         # Escopo SOURCE: apenas a seção de campos SOURCE. Índices de
         # conceitos/tópicos e bundles são específicos de ITEM.
-        source_section = _build_source_fields_section(ctx)
+        source_section = _build_source_fields_section(ctx, json_path=True)
         if source_section:
             parts.append(source_section)
         return "\n\n".join(parts)
 
-    fields_section = _build_item_fields_section(ctx)
+    fields_section = _build_item_fields_section(ctx, json_path=True)
     if fields_section:
         parts.append(fields_section)
 
@@ -242,14 +290,8 @@ def _build_values_system_prompt(ctx: dict, scope: str) -> str:
     if topic_section:
         parts.append(topic_section)
 
-    bundle_pairs = ctx.get("bundle_pairs", [])
-    if bundle_pairs:
-        bundle_strs = [" + ".join(b) for b in bundle_pairs]
-        parts.append(
-            "BUNDLED FIELDS (BUNDLE): " + ", ".join(bundle_strs)
-            + " — within one annotation these must all be present together or all absent."
-        )
-
+    # Bundles: descritos no OUTPUT CONTRACT (`_bundle_contract`), junto do
+    # array do schema que os carrega.
     return "\n\n".join(parts)
 
 
@@ -280,7 +322,7 @@ def _build_values_document_message(
     )
 
 
-def _build_item_fields_section(ctx: dict) -> str:
+def _build_item_fields_section(ctx: dict, json_path: bool = False) -> str:
     """Gera a seção de instruções por campo ITEM do template."""
     item_fields: dict = ctx["item_fields"]
     required_item: list = ctx["required_item"]
@@ -293,16 +335,53 @@ def _build_item_fields_section(ctx: dict) -> str:
 
     for name, spec in item_fields.items():
         req_label = "REQUIRED" if name in required_item else "OPTIONAL"
-        instruction = _field_instruction(name, spec, chain_relations)
+        instruction = _field_instruction(
+            name, spec, chain_relations, json_path=json_path
+        )
         lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
         lines.append(f"    {instruction}")
 
     return "\n".join(lines)
 
 
+def describe_field(spec: FieldSpec) -> str:
+    """Texto do autor do template para um campo: DESCRIPTION e GUIDELINES.
+
+    A DESCRIPTION é a definição do campo; as GUIDELINES, o método de
+    preenchimento. As duas vão ao modelo. Antes valia `guidelines or
+    description`, e a DESCRIPTION sumia sempre que havia GUIDELINES — com ela,
+    definições como "status da chain imediatamente anterior" nunca chegavam ao
+    modelo. Quando a DESCRIPTION já está contida nas GUIDELINES, não se repete.
+
+    Returns:
+        O texto combinado, ou "" quando o campo não declara nenhum dos dois.
+    """
+    description = (spec.description or "").strip()
+    guidelines = (spec.guidelines or "").strip()
+    if description and guidelines:
+        if description in guidelines:
+            return guidelines
+        return f"Definition: {description}\n{guidelines}"
+    return guidelines or description
+
+
+def _indent_continuation(text: str, indent: str = "    ") -> str:
+    """Recua as linhas a partir da 2ª; a 1ª recebe o recuo de quem chama.
+
+    Os chamadores emitem a instrução como `f"    {instrução}"`. Sem este recuo,
+    só a 1ª linha das GUIDELINES ficava alinhada e as seguintes começavam na
+    margem, borrando a fronteira entre um campo e o seguinte no prompt.
+    """
+    lines = text.split("\n")
+    return "\n".join(
+        [lines[0]] + [indent + line if line.strip() else "" for line in lines[1:]]
+    )
+
+
 def _field_instruction(
     name: str, spec: FieldSpec, chain_relations: dict,
     fallback: Optional[str] = None,
+    json_path: bool = False,
 ) -> str:
     """Gera instrução para um campo com base em guidelines, description e tipo.
 
@@ -314,16 +393,18 @@ def _field_instruction(
             description. None usa a genérica por TIPO. O escopo SOURCE passa
             aqui a sua genérica por NOME (`_generic_source_instruction`), que
             é mais específica para campos de metadado documental.
+        json_path: True quando o prompt é do caminho JSON (structured outputs).
+            Muda só a descrição do formato de um CHAIN: no JSON o modelo
+            devolve hops e não escreve setas.
 
     Returns:
         A instrução, acrescida dos valores/relações/faixa derivados do tipo —
         é este acréscimo que entrega ao modelo a lista fechada de um
         ENUMERATED/ORDERED, as RELATIONS de um CHAIN e a faixa de um SCALE.
     """
-    # Instrução principal: guidelines > description > genérica (por nome ou tipo)
-    base = (
-        spec.guidelines
-        or spec.description
+    # Instrução principal: texto do autor (DESCRIPTION + GUIDELINES) > genérica
+    base = _indent_continuation(
+        describe_field(spec)
         or fallback
         or _generic_instruction(spec.type)
     )
@@ -349,11 +430,17 @@ def _field_instruction(
             extras.append(
                 "    Available relations (use only these):\n" + "\n".join(rel_lines)
             )
-        extras.append(
-            "    Syntax: Concept_A -> RELATION -> Concept_B -> RELATION -> Concept_C\n"
-            "    Odd number of elements. Concepts in snake_case. "
-            "No spaces in names."
-        )
+        # Só a forma do dado; convenções de nome (caixa, idioma) são do template.
+        if json_path:
+            extras.append(
+                "    Format: a list of hops {source, relation, target}; consecutive "
+                "hops of one path share a concept. No spaces in concept names."
+            )
+        else:
+            extras.append(
+                "    Syntax: Concept_A -> RELATION -> Concept_B -> RELATION -> Concept_C\n"
+                "    Odd number of elements. No spaces in concept names."
+            )
 
     elif spec.type == FieldType.TOPIC:
         pass  # topic_index é injetado separadamente
@@ -555,14 +642,14 @@ def _build_abstract_system_prompt(ctx: dict) -> str:
         "according to the project template.\n\n"
         "ABSOLUTE RULES:\n"
         "- Generate EXACTLY ONE SOURCE @{bibref} block at the beginning\n"
-        "- Generate ONE or MORE ITEM @{bibref} blocks for each causal chain, "
-        "finding or relevant argument extracted from the abstract\n"
+        # O que cada ITEM captura é definido pelos campos do template, não aqui.
+        "- Then generate the ITEM @{bibref} blocks the template calls for; "
+        "the ITEM FIELDS below define what each ITEM captures\n"
         "- Do NOT generate ONTOLOGY, PROJECT, TEMPLATE or any other block type\n"
         "- Do NOT use markdown, backticks (```) or any extra formatting\n"
         "- Do NOT add explanations, comments or any text outside the blocks\n"
-        "- Each ITEM must capture ONE specific finding, causal relation or argument\n"
-        "- If the abstract contains no codeable content, generate only the SOURCE block "
-        "with a note indicating this"
+        "- If the abstract contains nothing to annotate under the template, "
+        "generate only the SOURCE block"
     )
 
     lang = ctx.get("output_language")
@@ -571,8 +658,7 @@ def _build_abstract_system_prompt(ctx: dict) -> str:
             f"OUTPUT LANGUAGE: All free-text field values (MEMO, TEXT descriptions, "
             f"TOPIC categories) must be written in {lang}.\n"
             "Exceptions: QUOTATION blocks preserve the original language of the source "
-            "text. Concept names in CHAIN fields remain in the language used in "
-            "EXISTING PROJECT CONCEPTS below."
+            "text." + _concepts_language_clause(ctx)
         )
 
     # Contexto metodológico do projeto
@@ -607,7 +693,7 @@ def _build_abstract_system_prompt(ctx: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _build_source_fields_section(ctx: dict) -> str:
+def _build_source_fields_section(ctx: dict, json_path: bool = False) -> str:
     """Gera a seção de instruções por campo SOURCE do template.
 
     Usa `_field_instruction` — a mesma função dos escopos ITEM e ONTOLOGY — para
@@ -642,6 +728,7 @@ def _build_source_fields_section(ctx: dict) -> str:
         instruction = _field_instruction(
             name, spec, chain_relations,
             fallback=_generic_source_instruction(name),
+            json_path=json_path,
         )
         lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
         lines.append(f"    {instruction}")
@@ -693,13 +780,14 @@ def _build_abstract_values_system_prompt(ctx: dict) -> str:
         "OUTPUT CONTRACT:\n"
         "- Return ONLY a JSON object with two keys: \"source\" and \"items\"\n"
         "- \"source\": object with the SOURCE field values\n"
-        "- \"items\": array of objects, each holding the field VALUES of one ITEM "
-        "(one finding, causal relation or argument)\n"
+        "- \"items\": array of objects, each holding the field VALUES of one ITEM, "
+        "as defined by the ITEM FIELDS below\n"
         "- Provide values only — do NOT write Synesis block keywords, field names "
         "with colons, indentation, or chain arrows. The system assembles the blocks.\n"
         "- For CHAIN fields, return a list of hops; each hop is "
         "{\"source\": concept, \"relation\": one allowed relation, \"target\": concept}\n"
         "- Omit OPTIONAL fields you have no content for; include all REQUIRED fields"
+        + _bundle_contract(ctx)
     )
 
     lang = ctx.get("output_language")
@@ -707,18 +795,18 @@ def _build_abstract_values_system_prompt(ctx: dict) -> str:
         parts.append(
             f"OUTPUT LANGUAGE: All free-text values (MEMO, TEXT, TOPIC) must be "
             f"written in {lang}. "
-            "QUOTATION values preserve the source language. Chain concepts stay in the "
-            "language of EXISTING PROJECT CONCEPTS below."
+            "QUOTATION values preserve the source language."
+            + _concepts_language_clause(ctx)
         )
 
     if ctx.get("project_description"):
         parts.append("PROJECT CONTEXT:\n" + ctx["project_description"])
 
-    source_section = _build_source_fields_section(ctx)
+    source_section = _build_source_fields_section(ctx, json_path=True)
     if source_section:
         parts.append(source_section)
 
-    item_fields_section = _build_item_fields_section(ctx)
+    item_fields_section = _build_item_fields_section(ctx, json_path=True)
     if item_fields_section:
         parts.append(item_fields_section)
 
@@ -730,14 +818,7 @@ def _build_abstract_values_system_prompt(ctx: dict) -> str:
     if topic_section:
         parts.append(topic_section)
 
-    bundle_pairs = ctx.get("bundle_pairs", [])
-    if bundle_pairs:
-        bundle_strs = [" + ".join(b) for b in bundle_pairs]
-        parts.append(
-            f"BUNDLE CONSTRAINT: {', '.join(bundle_strs)} "
-            "— these fields must appear together or not at all within each ITEM."
-        )
-
+    # Bundles: descritos no OUTPUT CONTRACT (`_bundle_contract`).
     return "\n\n".join(parts)
 
 
@@ -757,7 +838,7 @@ def _build_abstract_output_format_section(ctx: dict) -> str:
         "    ...",
         "  END ITEM",
         "",
-        "  (repeat ITEM blocks for each finding/relation)",
+        "  (repeat ITEM blocks as the template requires)",
     ]
 
     if bundle_pairs:
@@ -962,7 +1043,7 @@ def _build_ontology_values_system_prompt(ctx: dict) -> str:
     if ctx.get("project_description"):
         parts.append("PROJECT CONTEXT:\n" + ctx["project_description"])
 
-    ontology_fields_section = _build_ontology_fields_section(ctx)
+    ontology_fields_section = _build_ontology_fields_section(ctx, json_path=True)
     if ontology_fields_section:
         parts.append(ontology_fields_section)
 
@@ -1019,7 +1100,7 @@ def _build_ontology_system_prompt(ctx: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _build_ontology_fields_section(ctx: dict) -> str:
+def _build_ontology_fields_section(ctx: dict, json_path: bool = False) -> str:
     """Gera a seção de instruções por campo ONTOLOGY do template."""
     ontology_fields: dict = ctx.get("ontology_fields", {})
     required_ontology: list = ctx.get("required_ontology", [])
@@ -1031,7 +1112,9 @@ def _build_ontology_fields_section(ctx: dict) -> str:
 
     for name, spec in ontology_fields.items():
         req_label = "REQUIRED" if name in required_ontology else "OPTIONAL"
-        instruction = _field_instruction(name, spec, ctx.get("chain_relations", {}))
+        instruction = _field_instruction(
+            name, spec, ctx.get("chain_relations", {}), json_path=json_path
+        )
         lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
         lines.append(f"    {instruction}")
 

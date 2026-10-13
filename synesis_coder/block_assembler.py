@@ -21,10 +21,12 @@ Generated conforming to: Synesis Specification v1.1
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional, Tuple
 
 from synesis.ast.nodes import FieldType
 from synesis.ast.normalize import normalize_label
+
+from synesis_coder.schema_builder import bundle_groups
 
 _INDENT = "    "  # 4 espaços — indentação canônica de campo Synesis
 
@@ -44,7 +46,11 @@ def assemble_items(ctx: dict, bibref: str, data: dict) -> str:
     items = _extract_item_list(data)
     fields = ctx["item_fields"]
     required = set(ctx.get("required_item", []))
-    blocks = [_assemble_block("ITEM", bibref, fields, obj, required) for obj in items]
+    groups = bundle_groups(ctx)
+    blocks = [
+        _assemble_block("ITEM", bibref, fields, obj, required, groups=groups)
+        for obj in items
+    ]
     return "\n\n".join(blocks)
 
 
@@ -86,6 +92,7 @@ _NA = "NA"  # sentinel para campos REQUIRED que o LLM não preencheu
 def _assemble_block(
     keyword: str, bibref: str, fields: dict, obj: dict, required: set,
     with_at: bool = True,
+    groups: Optional[List[Tuple[str, Tuple[str, ...], bool]]] = None,
 ) -> str:
     """Emite um bloco `KEYWORD @bibref ... END KEYWORD` para um objeto de valores.
 
@@ -97,10 +104,19 @@ def _assemble_block(
 
     `with_at=True` (SOURCE/ITEM) prefixa a referência com `@`; `with_at=False`
     (ONTOLOGY) usa o nome do conceito diretamente, sem `@`.
+
+    BUNDLES (`groups`): quando o objeto traz o array de um bundle (schema de
+    `schema_builder.bundle_groups`), cada objeto do array é emitido em sequência,
+    com os campos na ordem do bundle — um bundle completo após o outro. Um
+    objeto cujo CHAIN reúne caminhos desconectados é dividido num bundle por
+    caminho (`_split_disconnected_paths`). Sem o array (JSON no formato plano
+    antigo), os campos do bundle são emitidos como campos comuns.
     """
     ref = bibref.lstrip("@").strip()
     header = f"{keyword} @{ref}" if with_at else f"{keyword} {ref}"
     lines: List[str] = [header]
+    group_of = {member: group for group in (groups or []) for member in group[1]}
+    emitted_groups: set = set()
 
     for name, spec in fields.items():
         # Campos com origem-de-valor externa (ON BIBLIOGRAPHY / ON DATASET) NÃO
@@ -108,6 +124,18 @@ def _assemble_block(
         # resolvido na compilação. Emitir `NA` aqui gravaria um valor errado e
         # violaria a convenção "o .syn não materializa a fonte externa" (§11.3).
         if getattr(spec, "value_origin", "document") in ("bibliography", "dataset"):
+            continue
+        group = group_of.get(name)
+        if group is not None and group[0] in obj:
+            key, members = group[0], group[1]
+            if key not in emitted_groups:
+                emitted_groups.add(key)
+                for bundle in _split_disconnected_paths(obj.get(key), members, fields):
+                    for member in members:
+                        member_value = bundle.get(member)
+                        if _has_value(member_value):
+                            for line in _render_field(member, fields[member], member_value):
+                                lines.append(_INDENT + line)
             continue
         value = obj.get(name)
         if not _has_value(value):
@@ -119,6 +147,55 @@ def _assemble_block(
 
     lines.append(f"END {keyword}")
     return "\n".join(lines)
+
+
+def _split_disconnected_paths(bundles, members: Tuple[str, ...], fields: dict) -> List[dict]:
+    """Divide o objeto-bundle cujo CHAIN reúne caminhos desconectados.
+
+    O schema não exprime contiguidade: um `chain` com os hops A->B e A->C (duas
+    relações independentes) viraria duas linhas `chain` com um único `status` e
+    um único `note` — E017. No teste de viabilidade da P11 foi o único erro que
+    restou (Sonnet, "community acceptance is a prerequisite for transitions
+    and uptake"). Como as duas relações vêm da mesma afirmação, cada caminho
+    vira um bundle próprio com cópia dos demais campos.
+
+    Só divide quando o bundle tem exatamente um campo CHAIN em forma de hops;
+    nos demais casos devolve o objeto como veio.
+    """
+    if not isinstance(bundles, list):
+        return []
+    chain_members = [
+        m for m in members if getattr(fields.get(m), "type", None) == FieldType.CHAIN
+    ]
+    result: List[dict] = []
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        if len(chain_members) != 1 or not isinstance(bundle.get(chain_members[0]), list):
+            result.append(bundle)
+            continue
+        chain_name = chain_members[0]
+        paths = _contiguous_paths(bundle[chain_name])
+        if len(paths) <= 1:
+            result.append(bundle)
+            continue
+        for path in paths:
+            result.append({**bundle, chain_name: path})
+    return result
+
+
+def _contiguous_paths(hops: list) -> List[list]:
+    """Agrupa hops em caminhos contíguos (`target[i] == source[i+1]`)."""
+    paths: List[list] = []
+    for hop in hops:
+        if not isinstance(hop, dict):
+            continue
+        src = _normalize_concept(hop.get("source", ""))
+        if paths and _normalize_concept(paths[-1][-1].get("target", "")) == src:
+            paths[-1].append(hop)
+        else:
+            paths.append([hop])
+    return paths
 
 
 def _render_field(name: str, spec, value) -> List[str]:

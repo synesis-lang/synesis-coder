@@ -57,7 +57,7 @@ from synesis_coder.revision_vocab import reserved_field_collisions
 from synesis_coder.runtime_info import runtime_banner
 from synesis_coder.schema_builder import build_item_schema
 from synesis_coder.synr_io import _END_ITEM, _ITEM_START, safe_write_output
-from synesis_coder.validator import validate_and_fix_async
+from synesis_coder.validator import make_json_fix_async, validate_and_fix_async
 
 _log = logging.getLogger(__name__)
 
@@ -199,8 +199,18 @@ async def _refine_single_item(
             candidate = await _re_extract(
                 ctx, bibref, source_text, current, tags, refine_client, thinking_budget
             )
+            json_fix = None
+            if refine_client.supports_json_schema():
+                json_fix = make_json_fix_async(
+                    refine_client,
+                    build_item_refinement_values_prompt(
+                        ctx, bibref, source_text, current, tags
+                    ),
+                    build_item_schema(ctx),
+                    lambda data: assemble_items(ctx, bibref, data),
+                )
             candidate, ok = await validate_and_fix_async(
-                candidate, ctx, refine_client, scope="item",
+                candidate, ctx, refine_client, scope="item", json_fix=json_fix,
             )
             if not ok:
                 _log.warning(

@@ -837,6 +837,7 @@ class LLMClient:
         schema: dict,
         temperature: Optional[float] = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        correction: bool = False,
     ) -> Optional[dict]:
         """Chama o LLM pedindo JSON conforme `schema` e retorna o dict parseado.
 
@@ -849,6 +850,8 @@ class LLMClient:
             schema: JSON Schema (de schema_builder) descrevendo os valores.
             temperature: Temperatura da geração.
             max_tokens: Máximo de tokens de output.
+            correction: True quando a chamada é uma CORREÇÃO pelo caminho JSON
+                (validator, `json_fix`): contabiliza como correção, igual a fix().
 
         Returns:
             dict parseado, ou None para acionar fallback.
@@ -857,6 +860,9 @@ class LLMClient:
             return None
 
         self._wait_if_rate_limited()
+        # O flag é por-thread e consumido a cada _call_sync_inner: as
+        # re-tentativas abaixo o religam.
+        self._correction_local.is_correction = correction
         try:
             raw = self._call_sync_inner(
                 messages, temperature, max_tokens, thinking=False, schema=schema
@@ -872,6 +878,7 @@ class LLMClient:
                 exc.block_types, exc.max_tokens, retry_tokens,
             )
             self._wait_if_rate_limited()
+            self._correction_local.is_correction = correction
             try:
                 raw = self._call_sync_inner(
                     messages, temperature, retry_tokens, thinking=False,
@@ -884,6 +891,7 @@ class LLMClient:
             # Falha transitória de infraestrutura — ver nota em call_json_async.
             _log.warning("Caminho JSON: %s — repetindo uma vez.", exc)
             self._wait_if_rate_limited()
+            self._correction_local.is_correction = correction
             try:
                 raw = self._call_sync_inner(
                     messages, temperature, max_tokens, thinking=False, schema=schema
@@ -911,6 +919,7 @@ class LLMClient:
         # garantias do schema (ver _log_malformed_json).
         self._log_malformed_json(retried=False)
         self._wait_if_rate_limited()
+        self._correction_local.is_correction = correction
         try:
             raw = self._call_sync_inner(
                 messages, _MALFORMED_JSON_RETRY_TEMPERATURE, max_tokens,
@@ -975,8 +984,13 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         context: Optional[tuple] = None,
+        correction: bool = False,
     ) -> Optional[dict]:
-        """Versão assíncrona de call_json() para modos de lote."""
+        """Versão assíncrona de call_json() para modos de lote.
+
+        `correction` segue a semântica de call_json(): marca a chamada como
+        correção (contabilidade e log de debug), como fix_async().
+        """
         if not self.supports_json_schema():
             return None
 
@@ -987,6 +1001,8 @@ class LLMClient:
             force: Optional[int] = None,
             temp: Optional[float] = None,
         ) -> str:
+            # Flag por-thread: setado dentro da thread worker que chama a API.
+            self._correction_local.is_correction = correction
             if self.recorder is not None:
                 self.recorder.set_context(context)
             return self._call_sync_inner(

@@ -59,6 +59,7 @@ from synesis_coder.prompt_builder import (
     build_document_prompt,
     build_document_source_values_prompt,
     build_document_values_prompt,
+    describe_field,
 )
 from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
 from synesis_coder.schema_builder import build_item_schema, build_source_schema
@@ -68,6 +69,7 @@ from synesis_coder.validator import (
     _extract_item_blocks,
     _has_structural_errors,
     _strip_markdown_fences,
+    make_json_fix_async,
     validate_and_fix_async,
 )
 
@@ -551,7 +553,8 @@ def _build_source_fields_instruction(ctx: dict) -> str:
     lines = ["CAMPOS DO SOURCE:"]
     for name, spec in source_fields.items():
         req = "REQUIRED" if name in required_source else "OPTIONAL"
-        instruction = spec.guidelines or spec.description or ""
+        # DESCRIPTION e GUIDELINES juntas, como nos demais prompts.
+        instruction = describe_field(spec).replace("\n", "\n    ")
         lines.append(f"  {name} ({spec.type.name}) [{req}]: {instruction}")
 
     lines.append(
@@ -769,11 +772,21 @@ async def _process_chunk(
             )
             return chunk_index, [], False
 
-        # Validar e corrigir
+        # Validar e corrigir — a correção usa o caminho JSON quando disponível
         annotation_key = f"{bibref}_chunk{chunk_index}.syn"
+        json_fix = None
+        if llm_client.supports_json_schema():
+            json_fix = make_json_fix_async(
+                llm_client,
+                build_document_values_prompt(ctx, bibref, chunk, chunk_index, total_chunks),
+                build_item_schema(ctx),
+                lambda data: assemble_items(ctx, bibref, data),
+                context,
+            )
         final_syn, success = await validate_and_fix_async(
             raw, ctx, llm_client, annotation_key=annotation_key,
             recorder=llm_client.recorder, context=context, scope="item",
+            json_fix=json_fix,
         )
 
         # Extrair apenas blocos ITEM

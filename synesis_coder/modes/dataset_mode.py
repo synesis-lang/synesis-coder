@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from synesis_coder.block_assembler import count_item_blocks, dedupe_item_blocks, foreign_bibrefs
 from synesis_coder.concept_index import has_open_term_fields
 from synesis_coder.llm_client import LLMClient
-from synesis_coder.modes.abstract_mode import _generate_abstract_syn
+from synesis_coder.modes.abstract_mode import _generate_abstract_syn, abstract_json_fix
 from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.runtime_info import campaign_summary, runtime_banner
@@ -270,7 +270,8 @@ async def _process_dataset_async(
             # caminho texto-livre possa ter alucinado (o caminho JSON já exclui).
             raw = _strip_external_fields(raw, external)
             final, ok = await validate_and_fix_async(
-                raw, ctx, llm_client, annotation_key=f"{bibref}.syn"
+                raw, ctx, llm_client, annotation_key=f"{bibref}.syn",
+                json_fix=abstract_json_fix(ctx, bibref, text, llm_client, context),
             )
             # Re-strip: o loop de correção do validador pode reintroduzir um campo
             # externo alucinado. A rede de segurança roda por último, antes da

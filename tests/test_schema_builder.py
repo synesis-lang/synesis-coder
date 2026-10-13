@@ -16,6 +16,7 @@ from synesis_coder.schema_builder import (
     _nullable,
     build_item_schema,
     build_source_schema,
+    bundle_groups,
     field_to_schema,
 )
 
@@ -137,8 +138,15 @@ class TestBuildSchemasFromRealProject:
         schema = build_item_schema(ctx)
         assert schema["properties"]["items"]["type"] == "array"
         item_obj = schema["properties"]["items"]["items"]
-        # Todos os campos ITEM presentes; additionalProperties=false elimina E022
-        assert set(item_obj["properties"]) == set(ctx["item_fields"])
+        # Todos os campos ITEM presentes — soltos no ITEM ou dentro do array do
+        # bundle (P11); additionalProperties=false elimina E022
+        covered = set(item_obj["properties"])
+        for key, _members, _required in bundle_groups(ctx):
+            bundle_obj = item_obj["properties"][key]["items"]
+            assert bundle_obj["additionalProperties"] is False
+            covered.discard(key)
+            covered |= set(bundle_obj["properties"])
+        assert covered == set(ctx["item_fields"])
         assert item_obj["additionalProperties"] is False
         # REQUIRED do template propagado
         assert "text" in item_obj["required"]
@@ -179,8 +187,11 @@ class TestStrictModeConformance:
         """OPTIONAL vira tipo nullable — a opcionalidade não some do schema."""
         ctx = load_project(PROJECT_SOCIAL)
         item_obj = build_item_schema(ctx)["properties"]["items"]["items"]
-        optional = set(ctx["item_fields"]) - set(ctx["required_item"])
-        assert optional, "fixture precisa ter ao menos um campo OPTIONAL"
+        # Campos de bundle não são nullable: a opcionalidade do bundle inteiro
+        # está no array, que pode vir vazio (P11).
+        in_bundle = {m for _k, members, _r in bundle_groups(ctx) for m in members}
+        optional = set(ctx["item_fields"]) - set(ctx["required_item"]) - in_bundle
+        assert optional or in_bundle, "fixture precisa ter ao menos um campo OPTIONAL"
         for name in optional:
             frag = item_obj["properties"][name]
             accepts_null = (

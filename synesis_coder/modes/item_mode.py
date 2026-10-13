@@ -19,7 +19,7 @@ from synesis_coder.project_loader import assert_bibref_known, load_project
 from synesis_coder.prompt_builder import build_item_prompt, build_item_values_prompt
 from synesis_coder.runtime_info import runtime_banner, warn_schema_fallbacks
 from synesis_coder.schema_builder import build_item_schema
-from synesis_coder.validator import validate_and_fix
+from synesis_coder.validator import make_json_fix, validate_and_fix
 
 
 def process_item(
@@ -70,8 +70,17 @@ def process_item(
     #      json_schema ou a resposta não é JSON válido.
     raw_syn = _generate_item_syn(ctx, bibref, text, client)
 
-    # 4. Validar e corrigir (erros semânticos residuais: SCALE/BUNDLE/ARITY/código)
-    final_syn, success = validate_and_fix(raw_syn, ctx, client)
+    # 4. Validar e corrigir (erros semânticos residuais: SCALE/BUNDLE/ARITY/código).
+    #    A correção usa o caminho JSON (mesmo prompt e schema) quando disponível.
+    json_fix = None
+    if client.supports_json_schema():
+        json_fix = make_json_fix(
+            client,
+            build_item_values_prompt(ctx, bibref, text),
+            build_item_schema(ctx),
+            lambda data: assemble_items(ctx, bibref, data),
+        )
+    final_syn, success = validate_and_fix(raw_syn, ctx, client, json_fix=json_fix)
 
     # Degradação silenciosa: se o caminho JSON foi abandonado, este bloco saiu
     # sem as restrições do schema mesmo que a validação tenha passado.

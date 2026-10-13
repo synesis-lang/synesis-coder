@@ -85,16 +85,33 @@ def _build_messages(
 
     if mode == "ontology":
         # O user message de ontology deriva de semantic_ctx (frequência,
-        # relações e exemplos extraídos do corpus por código). Sem um código
-        # escolhido não há contexto semântico real; um semantic_ctx vazio
-        # produz a moldura da mensagem, e as GUIDELINES — que é o que se
-        # revisa aqui — vivem integralmente no system prompt.
+        # relações e exemplos extraídos do corpus por código). Com um código
+        # real, o dump monta a MESMA evidência da execução; antes usava sempre
+        # um semantic_ctx vazio e imprimia "0 occurrence(s)", levando quem
+        # revisa a concluir que a geração roda sem evidência. Sem código, a
+        # moldura vazia é mantida e `dump_prompt` declara a omissão.
         code = text or "<<CÓDIGO>>"
+        semantic_ctx = _ontology_semantic_ctx(ctx, text) if text else {}
         if path == "json":
-            return pb.build_ontology_values_prompt(ctx, code, {})
-        return pb.build_ontology_prompt(ctx, code, {})
+            return pb.build_ontology_values_prompt(ctx, code, semantic_ctx)
+        return pb.build_ontology_prompt(ctx, code, semantic_ctx)
 
     raise ValueError(f"Modo sem dump de prompt: {mode!r}")
+
+
+def _ontology_semantic_ctx(ctx: dict, code: str) -> dict:
+    """Evidência do corpus para `code`, a mesma que o modo ontology envia.
+
+    Importação tardia: `ontology_mode` importa `prompt_dump` no caminho de
+    `--prompt-only`. Falha ao montar a evidência não derruba o dump — o system
+    prompt, que é o objeto da revisão, continua íntegro.
+    """
+    try:
+        from synesis_coder.modes.ontology_mode import _build_semantic_ctx
+
+        return _build_semantic_ctx(code, ctx)
+    except Exception:  # noqa: BLE001 — o dump é ferramenta de inspeção
+        return {}
 
 
 def _fence_for(content: str) -> str:
@@ -150,6 +167,12 @@ def dump_prompt(
     ]
     if bibref:
         lines.append(f"bibref: `@{bibref}`")
+    if mode == "ontology":
+        lines.append(
+            f"conceito: `{text}` · evidência do corpus: a mesma da execução"
+            if text else
+            "evidência do corpus: OMITIDA (nenhum conceito anotado no projeto)"
+        )
     lines.append("")
 
     for msg in messages:

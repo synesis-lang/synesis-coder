@@ -45,7 +45,11 @@ from synesis_coder.runtime_info import (
 )
 from synesis_coder.schema_builder import build_abstract_schema
 from synesis_coder.synr_io import safe_write_output
-from synesis_coder.validator import validate_and_fix_async
+from synesis_coder.validator import (
+    JsonFixAsync,
+    make_json_fix_async,
+    validate_and_fix_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +161,43 @@ async def _generate_abstract_syn(
 
     messages = build_abstract_prompt(ctx, bibref, abstract)
     return await llm_client.call_async(messages, temperature=0.0, context=context)
+
+
+def abstract_json_fix(
+    ctx: dict,
+    bibref: str,
+    text: str,
+    llm_client: LLMClient,
+    context: Optional[tuple] = None,
+) -> Optional[JsonFixAsync]:
+    """Gancho de correção pelo caminho JSON para SOURCE + ITEMs (P12).
+
+    Usa o mesmo prompt de valores, o mesmo schema e o mesmo assembler da
+    geração: o bloco corrigido mantém as garantias do schema (bundle completo,
+    enum, campos conhecidos), em vez de voltar ao texto livre. Também serve ao
+    modo dataset, que gera por `_generate_abstract_syn`.
+
+    Returns:
+        O gancho, ou None quando o backend não aceita JSON Schema.
+    """
+    if not llm_client.supports_json_schema():
+        return None
+
+    def _assemble(data: dict) -> str:
+        if not isinstance(data, dict) or "source" not in data or "items" not in data:
+            raise ValueError("JSON de correção sem as chaves 'source'/'items'")
+        return (
+            assemble_source(ctx, bibref, data["source"]) + "\n\n"
+            + assemble_items(ctx, bibref, data)
+        )
+
+    return make_json_fix_async(
+        llm_client,
+        build_abstract_values_prompt(ctx, bibref, text),
+        build_abstract_schema(ctx),
+        _assemble,
+        context,
+    )
 
 
 # Marca de registro que falhou. Precede um SOURCE sintaticamente válido para
@@ -488,6 +529,7 @@ async def _process_one_abstract(
         final_syn, success = await validate_and_fix_async(
             raw_syn, ctx, llm_client, annotation_key=annotation_key,
             recorder=llm_client.recorder, context=context,
+            json_fix=abstract_json_fix(ctx, bibref, abstract, llm_client, context),
         )
 
         # Loop degenerativo: modelos fracos re-emitem o mesmo ITEM até esgotar
