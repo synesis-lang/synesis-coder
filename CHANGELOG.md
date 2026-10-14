@@ -11,6 +11,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.14.1] — 2026-10-14
+
+Requer `synesis>=0.13.3` (antes 0.13.1): o compilador entrega as GUIDELINES como
+foram escritas, e os testes de fidelidade ao template conferem isso.
+
+### Changed — aviso de GUIDELINES alteradas aponta para o synesis 0.13.3
+
+- O synesis 0.13.3 entrega as GUIDELINES como foram escritas. O aviso de
+  `template_lint` continua como proteção (instalação com compilador antigo), mas agora diz que
+  a alteração vem do compilador anterior à 0.13.3 e sugere atualizá-lo.
+- Os testes de `TestAvisoDeTemplate` dependiam do defeito: esperavam que o
+  compilador alterasse `Include` para `INCLUDE`. Agora conferem que o compilador
+  atual entrega a linha intacta, e a detecção é testada simulando o compilador
+  anterior.
+
+### Performance — `ontology` valida cada entrada só contra o template
+
+A validação de cada entrada ONTOLOGY carregava o projeto inteiro: todas as
+anotações e toda a bibliografia. No Social Acceptance 2.0 (453 anotações), isso
+custava 2,3 a 3,3 s por conceito, numa chamada síncrona que bloqueava as demais
+chamadas concorrentes. Só a validação somava cerca de 8 min em série para 194
+conceitos.
+
+- `validate_ontology_entry` e a versão assíncrona carregam só projeto, template
+  e a entrada (`_ontology_load_kwargs`): **0,02 s por entrada**.
+- **O veredito não muda.** Em 80 entradas reais (Social Acceptance OTIC e
+  synesis_nt), as duas formas de carga aprovaram as mesmas entradas. Em 5 tipos
+  de erro (campo inexistente, valor ORDERED inválido, campo obrigatório
+  ausente, sintaxe quebrada), as duas rejeitaram com o mesmo diagnóstico.
+- Testes: `TestOntologyValidationIsTemplateOnly` (entrada válida passa sem
+  anotações nem bibliografia na carga; entrada inválida continua rejeitada).
+
+---
+
 ## [0.14.0] — 2026-10-12
 
 Fidelidade ao template: o que o autor escreve no `.synt` passa a chegar ao modelo,

@@ -450,6 +450,62 @@ class TestValidateOntologyEntry:
         assert result == ""
 
 
+def _first_real_ontology_entry(synp: Path) -> str:
+    import re
+
+    syno = synp.with_suffix(".syno")
+    return re.findall(
+        r"(?ms)^ONTOLOGY .*?^END ONTOLOGY[ \t]*$", syno.read_text(encoding="utf-8")
+    )[0]
+
+
+@SKIP_IF_NO_SOCIAL
+class TestOntologyValidationIsTemplateOnly:
+    """A validação de UMA entrada carrega só projeto e template.
+
+    Anotações e bibliografia não mudam o veredito e custavam 2–3 s por conceito,
+    em chamada síncrona que bloqueava as demais.
+    """
+
+    def _ctx(self):
+        from synesis_coder.project_loader import load_project
+
+        return load_project(
+            SOCIAL_ACCEPTANCE_SYNP, load_annotations=True, load_ontology=False,
+            tolerate_annotation_errors=True,
+        )
+
+    def test_valid_entry_passes_without_annotations_or_bibliography(self):
+        import synesis
+
+        from synesis_coder.validator import validate_ontology_entry
+
+        ctx = self._ctx()
+        assert ctx.get("annotation_contents"), "o projeto real deve ter anotações"
+        entry = _first_real_ontology_entry(SOCIAL_ACCEPTANCE_SYNP)
+        llm = MagicMock()
+        with patch.object(synesis, "load", wraps=synesis.load) as spy:
+            output, ok = validate_ontology_entry(entry, ctx, llm)
+        assert ok is True
+        llm.fix.assert_not_called()
+        kwargs = spy.call_args.kwargs
+        assert "annotation_contents" not in kwargs
+        assert not any(k.startswith("bibliography") for k in kwargs)
+
+    def test_invalid_entry_still_rejected(self):
+        from synesis_coder.validator import validate_ontology_entry
+
+        ctx = self._ctx()
+        entry = _first_real_ontology_entry(SOCIAL_ACCEPTANCE_SYNP).replace(
+            "END ONTOLOGY", "    campo_inexistente: x\nEND ONTOLOGY"
+        )
+        llm = MagicMock()
+        llm.fix.side_effect = lambda output, *a, **k: output  # correção inócua
+        output, ok = validate_ontology_entry(entry, ctx, llm, max_tries=1)
+        assert ok is False
+        assert output.startswith("# ERRO: validação falhou")
+
+
 # ---------------------------------------------------------------------------
 # TestOntologyModeIntegration (requer LLM + projetos reais)
 # ---------------------------------------------------------------------------

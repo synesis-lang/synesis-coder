@@ -240,8 +240,19 @@ class TestDumpOntology:
 # --- P8: aviso de linha alterada --------------------------------------------------
 
 class TestAvisoDeTemplate:
+    def test_compilador_entrega_guidelines_intactas(self, ctx):
+        """Desde o synesis 0.13.3 a linha iniciada por palavra-chave chega como escrita."""
+        assert template_lint.altered_guideline_lines(TEMPLATE, ctx["field_specs"]) == []
+
     def test_detecta_linha_alterada(self, ctx):
-        altered = template_lint.altered_guideline_lines(TEMPLATE, ctx["field_specs"])
+        """Compilador anterior a 0.13.3 trocava `Include` por `INCLUDE`: o lint acusa."""
+        specs = dict(ctx["field_specs"])
+        spec = specs["description"]
+        specs["description"] = type(spec)(**{
+            **spec.__dict__,
+            "guidelines": "INCLUDE the technology domain when named.\nKeep it short.",
+        })
+        altered = template_lint.altered_guideline_lines(TEMPLATE, specs)
         assert altered == [("description", "INCLUDE the technology domain when named.")]
 
     def test_template_limpo_nao_avisa(self, ctx):
@@ -256,6 +267,11 @@ class TestAvisoDeTemplate:
 
     def test_avisa_uma_vez_por_template(self, tmp_path, caplog, monkeypatch):
         monkeypatch.setattr(template_lint, "_already_warned", set())
+        # O compilador atual não altera a linha: simula o anterior a 0.13.3.
+        monkeypatch.setattr(
+            template_lint, "altered_guideline_lines",
+            lambda content, specs: [("description", "INCLUDE the technology domain when named.")],
+        )
         synp = _project(tmp_path, with_annotations=False)
         with caplog.at_level(logging.WARNING, logger="synesis_coder.template_lint"):
             load_project(synp)

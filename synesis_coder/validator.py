@@ -557,6 +557,25 @@ def _extract_annotation_blocks(text: str) -> str:
     return "\n\n".join(block.strip() for block in blocks)
 
 
+def _ontology_load_kwargs(ctx: dict, ontology_key: str, output: str) -> dict:
+    """Argumentos de synesis.load() para validar UMA entrada ONTOLOGY.
+
+    Só projeto e template: as anotações e a bibliografia não mudam a validação
+    de uma entrada ONTOLOGY e custavam caro. No Social Acceptance 2.0 (453
+    anotações) cada carga levava 2,3–3,3 s contra 0,02 s, repetida a cada
+    conceito e síncrona (bloqueava as chamadas concorrentes). Em 80 entradas
+    reais (Social Acceptance OTIC e synesis_nt) e em 5 tipos de erro
+    (campo inexistente, ORDERED inválido, campo obrigatório ausente, sintaxe),
+    as duas cargas aprovaram e rejeitaram exatamente as mesmas entradas.
+    """
+    return {
+        "project_content": ctx["project_content"],
+        "template_content": ctx["template_content"],
+        "ontology_contents": {ontology_key: output},
+        "dataset_index": ctx.get("dataset_index"),
+    }
+
+
 def validate_ontology_entry(
     output: str,
     ctx: dict,
@@ -566,8 +585,7 @@ def validate_ontology_entry(
 ) -> Tuple[str, bool]:
     """Valida uma entrada ONTOLOGY via synesis.load(). Se inválida, solicita correção.
 
-    Valida o .syno gerado carregando-o junto com as anotações existentes
-    do projeto para que o compilador possa resolver referências a códigos.
+    Valida a entrada só contra o projeto e o template (`_ontology_load_kwargs`).
 
     Args:
         output: Texto Synesis com o bloco ONTOLOGY gerado pelo LLM.
@@ -588,14 +606,7 @@ def validate_ontology_entry(
 
     for attempt in range(max_tries + 1):
         try:
-            result = synesis.load(
-                project_content=ctx["project_content"],
-                template_content=ctx["template_content"],
-                annotation_contents=ctx.get("annotation_contents") or None,
-                ontology_contents={ontology_key: output},
-                **bibliography_kwargs(ctx),
-                dataset_index=ctx.get("dataset_index"),
-            )
+            result = synesis.load(**_ontology_load_kwargs(ctx, ontology_key, output))
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
             if attempt >= max_tries:
@@ -660,14 +671,7 @@ async def validate_ontology_entry_async(
 
     for attempt in range(max_tries + 1):
         try:
-            result = synesis.load(
-                project_content=ctx["project_content"],
-                template_content=ctx["template_content"],
-                annotation_contents=ctx.get("annotation_contents") or None,
-                ontology_contents={ontology_key: output},
-                **bibliography_kwargs(ctx),
-                dataset_index=ctx.get("dataset_index"),
-            )
+            result = synesis.load(**_ontology_load_kwargs(ctx, ontology_key, output))
         except Exception as exc:
             last_errors = f"Erro de parse: {exc}"
             if attempt >= max_tries:
