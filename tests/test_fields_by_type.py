@@ -64,7 +64,7 @@ class TestTrechoPeloTipo:
     def test_anchor_informa_itens_sem_trecho_em_vez_de_pular_em_silencio(self):
         assert items_without_excerpt(ITEM, ["text"]) == 1
         rel = format_report([], 1, without_excerpt=1, fields=["text"])
-        assert "0 ITEM(s) verificado(s)" in rel and "não verificados" in rel
+        assert "0 ITEM(s) checked" in rel and "not checked" in rel
 
 
 class TestNoteDeclarado:

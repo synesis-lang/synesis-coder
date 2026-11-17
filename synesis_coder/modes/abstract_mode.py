@@ -84,7 +84,7 @@ def parse_bib_entries(bib_path: Path) -> List[Dict[str, str]]:
     """
     bib_path = Path(bib_path).resolve()
     if not bib_path.exists():
-        raise FileNotFoundError(f"Arquivo .bib não encontrado: {bib_path}")
+        raise FileNotFoundError(f".bib file not found: {bib_path}")
 
     content = bib_path.read_text(encoding="utf-8")
 
@@ -100,7 +100,7 @@ def parse_bib_entries(bib_path: Path) -> List[Dict[str, str]]:
             continue
 
         if not abstract:
-            logger.info("Entrada '%s' sem abstract — pulando", bibref)
+            logger.info("Entry '%s' without abstract — skipping", bibref)
             skipped += 1
             continue
 
@@ -108,12 +108,12 @@ def parse_bib_entries(bib_path: Path) -> List[Dict[str, str]]:
 
     if not entries:
         raise ValueError(
-            f"Nenhuma entrada com abstract encontrada em '{bib_path.name}' "
-            f"({skipped} entrada(s) ignorada(s))."
+            f"No entry with an abstract found in '{bib_path.name}' "
+            f"({skipped} entry(ies) ignored)."
         )
 
     logger.info(
-        "Carregadas %d entradas com abstract de '%s' (%d ignoradas)",
+        "Loaded %d entries with abstract from '%s' (%d ignored)",
         len(entries), bib_path.name, skipped,
     )
     return entries
@@ -153,8 +153,8 @@ async def _generate_abstract_syn(
             # devolveu um dict (não contabilizou fallback) e o bloco resultante
             # sai válido, marcado OK, porém sem as garantias do schema.
             logger.warning(
-                "%s: resposta JSON sem as chaves 'source'/'items' (recebido: "
-                "%s) — gerando em TEXTO LIVRE, sem as garantias do schema.",
+                "%s: JSON response without the 'source'/'items' keys (received: "
+                "%s) — generating as FREE TEXT, without the schema guarantees.",
                 bibref, sorted(data.keys())[:5],
             )
             llm_client.usage.record_schema_fallback()
@@ -185,7 +185,7 @@ def abstract_json_fix(
 
     def _assemble(data: dict) -> str:
         if not isinstance(data, dict) or "source" not in data or "items" not in data:
-            raise ValueError("JSON de correção sem as chaves 'source'/'items'")
+            raise ValueError("Correction JSON without the 'source'/'items' keys")
         return (
             assemble_source(ctx, bibref, data["source"]) + "\n\n"
             + assemble_items(ctx, bibref, data)
@@ -219,7 +219,7 @@ def _placeholder_value(spec) -> str:
         return "0"
     if type_name == "DATE":
         return "1900-01-01"
-    return "(falha no processamento)"
+    return "(processing failure)"
 
 
 def _build_failure_block(ctx: dict, bibref: str, reason: str) -> str:
@@ -237,7 +237,7 @@ def _build_failure_block(ctx: dict, bibref: str, reason: str) -> str:
     source_fields = ctx.get("source_fields", {})
     required = ctx.get("required_source", [])
 
-    header = f"{FAILURE_MARKER}\n# ERRO: {reason}\n"
+    header = f"{FAILURE_MARKER}\n# ERROR: {reason}\n"
 
     if not source_fields or not required:
         # Template sem campos SOURCE obrigatórios: um SOURCE vazio já é válido.
@@ -289,12 +289,12 @@ def resolve_output_mode(per_reference: bool, split_every: Optional[int]) -> str:
     """
     if per_reference and split_every:
         raise ValueError(
-            "--per-reference e --split-every são mutuamente exclusivos: o "
-            "primeiro já gera um arquivo por referência."
+            "--per-reference and --split-every are mutually exclusive: the "
+            "first one already writes one file per reference."
         )
     if split_every is not None:
         if split_every < 1:
-            raise ValueError("--split-every deve ser >= 1.")
+            raise ValueError("--split-every must be >= 1.")
         return "split"
     return "per_reference" if per_reference else "single"
 
@@ -353,7 +353,7 @@ def completed_bibrefs(
             try:
                 content = path.read_text(encoding="utf-8")
             except OSError as exc:
-                logger.warning("Ignorando %s ao retomar: %s", path.name, exc)
+                logger.warning("Skipping %s on resume: %s", path.name, exc)
                 continue
             if is_complete_output(content):
                 # O nome do arquivo é a fonte do bibref; o SOURCE interno pode
@@ -368,7 +368,7 @@ def completed_bibrefs(
             try:
                 content = path.read_text(encoding="utf-8")
             except OSError as exc:
-                logger.warning("Ignorando %s ao retomar: %s", path.name, exc)
+                logger.warning("Skipping %s on resume: %s", path.name, exc)
                 continue
             for bibref, chunk in _iter_records(content):
                 if is_complete_output(chunk):
@@ -381,7 +381,7 @@ def completed_bibrefs(
     try:
         content = combined.read_text(encoding="utf-8")
     except OSError as exc:
-        logger.warning("Não foi possível ler %s ao retomar: %s", combined.name, exc)
+        logger.warning("Could not read %s when resuming: %s", combined.name, exc)
         return set()
 
     # No arquivo único os registros são concatenados. Fatiar por linha em branco
@@ -474,14 +474,14 @@ def resolve_cooldown_setting(value: str | float | None) -> Optional[float]:
             seconds = float(text)
         except ValueError as exc:
             raise ValueError(
-                f"Valor inválido para --cooldown: {value!r}. "
-                "Use 'auto' ou um número de segundos (0 desliga)."
+                f"Invalid value for --cooldown: {value!r}. "
+                "Use 'auto' or a number of seconds (0 disables it)."
             ) from exc
     else:
         seconds = float(value)
 
     if seconds < 0:
-        raise ValueError("--cooldown não pode ser negativo.")
+        raise ValueError("--cooldown cannot be negative.")
     return seconds
 
 
@@ -517,11 +517,11 @@ async def _process_one_abstract(
                 ctx, bibref, abstract, llm_client, context
             )
         except Exception as exc:
-            logger.error("Falha na chamada LLM para %s: %s", bibref, exc)
+            logger.error("LLM call failed for %s: %s", bibref, exc)
             # Bloco PARSEÁVEL: um .syn só de comentários derrubaria o
             # load_project() do batch seguinte e abortaria a campanha.
             error_output = _build_failure_block(
-                ctx, bibref, f"chamada LLM falhou para @{bibref}: {exc}"
+                ctx, bibref, f"LLM call failed for @{bibref}: {exc}"
             )
             return bibref, error_output, False
 
@@ -537,8 +537,8 @@ async def _process_one_abstract(
         final_syn, dupes = dedupe_item_blocks(final_syn)
         if dupes:
             logger.warning(
-                "%s: %d bloco(s) ITEM duplicado(s) removido(s) — possível "
-                "loop degenerativo do modelo.", bibref, dupes,
+                "%s: %d duplicate ITEM block(s) removed — possible "
+                "degenerate model loop.", bibref, dupes,
             )
 
         # Identidade: todo SOURCE/ITEM precisa carregar a chave pedida. Validar não
@@ -548,12 +548,12 @@ async def _process_one_abstract(
         if foreign:
             success = False
             logger.error(
-                "%s: a saída usa outra(s) chave(s) (%s) — registro rejeitado.",
+                "%s: the output uses other key(s) (%s) — record rejected.",
                 bibref, ", ".join(sorted(foreign)),
             )
             final_syn = (
-                f"# ERRO: a saída usa a(s) chave(s) {', '.join('@' + k for k in sorted(foreign))}"
-                f" no lugar de @{bibref}; o texto seria atribuído a outra fonte.\n"
+                f"# ERROR: the output uses the key(s) {', '.join('@' + k for k in sorted(foreign))}"
+                f" instead of @{bibref}; the text would be attributed to another source.\n"
                 + final_syn
             )
 
@@ -561,8 +561,8 @@ async def _process_one_abstract(
         if success and count_item_blocks(final_syn) == 0:
             success = False
             logger.error(
-                "%s: nenhum bloco ITEM gerado — o registro não produziu "
-                "anotação alguma (o .syn contém apenas SOURCE).", bibref,
+                "%s: no ITEM block generated — the record produced "
+                "no annotation at all (the .syn has only SOURCE).", bibref,
             )
 
         if llm_client.recorder is not None:
@@ -582,7 +582,7 @@ async def _process_one_abstract(
         if success:
             logger.debug("OK: %s", bibref)
         else:
-            logger.warning("Validação falhou para %s", bibref)
+            logger.warning("Validation failed for %s", bibref)
             # Marca o bloco para que `--resume` não o confunda com registro
             # pronto. O conteúdo gerado é preservado: serve de diagnóstico e
             # pode ser aproveitado numa correção manual.
@@ -702,7 +702,7 @@ async def _process_batch(
                 overwrite=True,
             )
         logger.debug(
-            "Escritas %d partição(ões) em %s",
+            "Wrote %d partition(s) to %s",
             len(accumulated_by_file), output_dir,
         )
 
@@ -715,7 +715,7 @@ async def _process_batch(
         safe_write_output(
             combined_path, "\n\n".join(accumulated) + "\n", overwrite=True
         )
-        logger.debug("Escrito: %s (%d registros)", combined_path, len(accumulated))
+        logger.debug("Written: %s (%d records)", combined_path, len(accumulated))
 
     return total_ok, total_fail
 
@@ -834,9 +834,9 @@ async def _process_abstract_async(
     output_dir = Path(output_dir).resolve()
     if output_dir.exists() and not output_dir.is_dir():
         raise ValueError(
-            f"'{output_dir}' já existe como arquivo, mas este comando espera um "
-            f"diretório de saída (os .syn são escritos dentro dele). "
-            f"Aponte --output-dir para uma pasta, ex.: --output-dir annotations"
+            f"'{output_dir}' already exists as a file, but this command expects an "
+            f"output folder (the .syn files are written inside it). "
+            f"Point --output-dir to a folder, e.g. --output-dir annotations"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -858,24 +858,24 @@ async def _process_abstract_async(
             entries = [e for _, e in kept]
             skipped_resume = total_in_corpus - len(entries)
             logger.info(
-                "Retomada: %d de %d registros já processados — restam %d.",
+                "Resume: %d of %d records already processed — %d left.",
                 skipped_resume, total_in_corpus, len(entries),
             )
             if not entries:
                 return (
-                    f"Nada a fazer: os {total_in_corpus} registros de "
-                    f"'{bib_path.name}' já foram processados em {output_dir}."
+                    f"Nothing to do: the {total_in_corpus} records of "
+                    f"'{bib_path.name}' were already processed in {output_dir}."
                 )
         else:
-            logger.info("Retomada solicitada, mas não há saída anterior utilizável.")
+            logger.info("Resume requested, but there is no usable previous output.")
 
     total = len(entries)
 
     # 3. Inicializar LLM client (com recorder de debug se solicitado)
     recorder = DebugRecorder(
         unit_type="entry",
-        unit_label="Referência",
-        coding_step_title="Etapa 1 — Codificação dos abstracts",
+        unit_label="Reference",
+        coding_step_title="Step 1 — Coding the abstracts",
     ) if debug else None
     llm_client = LLMClient(model=model, recorder=recorder)
     runtime_banner(llm_client, format=format, concurrent=concurrent)
@@ -922,7 +922,7 @@ async def _process_abstract_async(
                     accumulated_by_file[path.name] = blocks
             if accumulated_by_file:
                 logger.info(
-                    "Retomada: %d partição(ões) preservada(s).",
+                    "Resume: %d partition(s) kept.",
                     len(accumulated_by_file),
                 )
         else:
@@ -931,9 +931,9 @@ async def _process_abstract_async(
             ]
             if existing and not overwrite:
                 raise FileExistsError(
-                    f"{len(existing)} arquivo(s) de partição já existem em "
-                    f"{output_dir}. Use --overwrite para substituí-los, ou "
-                    "--resume para continuar de onde parou."
+                    f"{len(existing)} partition file(s) already exist in "
+                    f"{output_dir}. Use --overwrite to replace them, or "
+                    "--resume to continue where it stopped."
                 )
 
     elif not per_reference:
@@ -948,7 +948,7 @@ async def _process_abstract_async(
                 chunk.rstrip("\n") for _, chunk in _iter_records(previous)
             )
             logger.info(
-                "Retomada: %d registro(s) preservados de %s",
+                "Resume: %d record(s) kept from %s",
                 len(accumulated), combined_path.name,
             )
         elif combined_path.exists() and not overwrite:
@@ -956,9 +956,9 @@ async def _process_abstract_async(
             # qualquer chamada de API. Dentro do loop cada batch grava com
             # overwrite=True, pois o arquivo é da própria execução corrente.
             raise FileExistsError(
-                f"'{combined_path.name}' já existe em {output_dir}. "
-                "Use --overwrite para substituí-lo, ou --resume para continuar "
-                "de onde parou."
+                f"'{combined_path.name}' already exists in {output_dir}. "
+                "Use --overwrite to replace it, or --resume to continue "
+                "where it stopped."
             )
 
         if backup and combined_path.exists():
@@ -971,7 +971,7 @@ async def _process_abstract_async(
         batch_entries = entries[batch_start : batch_start + batch_size]
 
         logger.debug(
-            "Batch %d: %d entradas (%d/%d)",
+            "Batch %d: %d entries (%d/%d)",
             batch_num, len(batch_entries), batch_start + len(batch_entries), total,
         )
 
@@ -983,9 +983,9 @@ async def _process_abstract_async(
             ctx = load_project(project_path, load_annotations=True)
         except Exception as exc:
             logger.warning(
-                "Batch %d: recarga do projeto falhou (%s) — seguindo com o "
-                "contexto do batch anterior; conceitos novos podem não ser "
-                "reusados neste batch.",
+                "Batch %d: reloading the project failed (%s) — continuing with the "
+                "context of the previous batch; new concepts may not be "
+                "reused in this batch.",
                 batch_num, exc,
             )
 
@@ -1014,7 +1014,7 @@ async def _process_abstract_async(
             )
             if cooldown > 0:
                 logger.debug(
-                    "Batch %d levou %.1fs — cooldown de %.1fs antes do próximo",
+                    "Batch %d took %.1fs — cooldown of %.1fs before the next one",
                     batch_num, batch_elapsed, cooldown,
                 )
                 await asyncio.sleep(cooldown)
@@ -1034,7 +1034,7 @@ async def _process_abstract_async(
         elapsed=elapsed,
         output=str(output_dir),
         llm_client=llm_client,
-        unit="referências",
+        unit="references",
         skipped=skipped_resume,
     )
     # Não emitir por logger: o sumário é o valor de RETORNO do modo, e a CLI o
@@ -1048,23 +1048,23 @@ async def _process_abstract_async(
             total_fail=total_fail,
             tokens_line=llm_client.usage.summary_line(),
             elapsed=elapsed,
-            validation="✅ OK" if total_fail == 0 else "⚠️ COM FALHAS",
+            validation="✅ OK" if total_fail == 0 else "⚠️ WITH FAILURES",
             output_file=(
-                "<um .syn por referência>" if per_reference else "annotations.syn"
+                "<one .syn per reference>" if per_reference else "annotations.syn"
             ),
         )
         debug_path = output_dir / f"{project_path.stem}_abstract_debug.md"
         recorder.write(debug_path)
-        logger.debug("Relatório de debug escrito: %s", debug_path)
+        logger.debug("Debug report written: %s", debug_path)
 
     if format == "verbose":
         header = (
             f"# synesis-coder abstract\n"
-            f"# projeto: {project_path.stem}\n"
+            f"# project: {project_path.stem}\n"
             f"# input: {bib_path.name}\n"
-            f"# total: {total} | OK: {total_ok} | falhas: {total_fail}\n"
+            f"# total: {total} | OK: {total_ok} | failures: {total_fail}\n"
             f"# {llm_client.usage.summary_line()}\n"
-            f"# tempo: {elapsed:.1f}s\n"
+            f"# time: {elapsed:.1f}s\n"
         )
         return header + "\n" + summary
 

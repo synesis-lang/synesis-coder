@@ -230,11 +230,11 @@ class TestDumpOntology:
     def test_com_conceito_traz_a_evidencia(self, ctx):
         md = dump_prompt(ctx, mode="ontology", text="trust", path="json")
         assert "1 occurrence(s) across 1 distinct source(s)" in md
-        assert "evidência do corpus: a mesma da execução" in md
+        assert "corpus evidence: the same as in the run" in md
 
     def test_sem_conceito_declara_a_omissao(self, ctx_empty):
         md = dump_prompt(ctx_empty, mode="ontology", text=None, path="json")
-        assert "OMITIDA" in md
+        assert "OMITTED" in md
 
 
 # --- P8: aviso de linha alterada --------------------------------------------------

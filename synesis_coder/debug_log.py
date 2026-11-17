@@ -88,7 +88,7 @@ def _friendly_line(err: Any) -> str:
         text = err.to_cli_line()
     except Exception:
         text = str(err)
-    suffix = f" *(código técnico: {code})*" if code else ""
+    suffix = f" *(technical code: {code})*" if code else ""
     return f"{text}{suffix}"
 
 
@@ -176,8 +176,8 @@ class DebugRecorder:
     def __init__(
         self,
         unit_type: str = "chunk",
-        unit_label: str = "Trecho",
-        coding_step_title: str = "Etapa 2 — Codificação dos trechos",
+        unit_label: str = "Chunk",
+        coding_step_title: str = "Step 2 — Coding the excerpts",
     ) -> None:
         """Inicializa o recorder.
 
@@ -323,55 +323,55 @@ class DebugRecorder:
 
     def _render_header(self) -> str:
         h = self._header
-        lines = ["# Relatório de Depuração — synesis-coder", ""]
+        lines = ["# Debug Report — synesis-coder", ""]
         if h.get("project"):
-            lines.append(f"**Projeto:** {h['project']}")
+            lines.append(f"**Project:** {h['project']}")
         if h.get("input_name"):
             chars = h.get("input_chars")
-            extra = f" ({chars:,} caracteres)".replace(",", ".") if chars else ""
-            doc_label = "Corpus" if self.unit_type == "entry" else "Documento"
+            extra = f" ({chars:,} characters)" if chars else ""
+            doc_label = "Corpus" if self.unit_type == "entry" else "Document"
             lines.append(f"**{doc_label}:** {h['input_name']}{extra}")
         if h.get("bibref"):
-            lines.append(f"**Referência:** @{h['bibref']}")
+            lines.append(f"**Reference:** @{h['bibref']}")
         if h.get("model"):
             backend = h.get("backend", "")
             backend_str = f" (backend: {backend})" if backend else ""
-            lines.append(f"**Modelo:** {h['model']}{backend_str}")
+            lines.append(f"**Model:** {h['model']}{backend_str}")
         if h.get("start"):
-            lines.append(f"**Início:** {h['start']}")
+            lines.append(f"**Start:** {h['start']}")
         lines.append("")
         if h.get("total_chunks") is not None:
             if h.get("chunk_size") is not None:
                 lines.append(
-                    f"**Configuração de chunking:** {h['total_chunks']} trechos · "
-                    f"tamanho {h.get('chunk_size', '?')} · "
-                    f"sobreposição {h.get('overlap', '?')}"
+                    f"**Chunking settings:** {h['total_chunks']} chunks · "
+                    f"size {h.get('chunk_size', '?')} · "
+                    f"overlap {h.get('overlap', '?')}"
                 )
             else:
                 lines.append(
-                    f"**Entradas:** {h['total_chunks']} referência(s) com abstract"
+                    f"**Inputs:** {h['total_chunks']} reference(s) with abstract"
                 )
         params = []
         if h.get("temperature") is not None:
-            params.append(f"temperatura {h['temperature']}")
+            params.append(f"temperature {h['temperature']}")
         if h.get("max_tokens"):
-            params.append(f"máx. tokens {h['max_tokens']}")
+            params.append(f"max tokens {h['max_tokens']}")
         if params:
-            lines.append("**Parâmetros do modelo:** " + " · ".join(params))
+            lines.append("**Model parameters:** " + " · ".join(params))
         lines.append("\n---\n")
         return "\n".join(lines)
 
     def _render_source_section(self, call: LLMCallEvent) -> str:
         lines = [
-            "## Etapa 1 — Geração do bloco SOURCE\n",
-            "> Antes de codificar, a IA cria o cabeçalho bibliográfico do documento.\n",
-            "**Enviado ao modelo (instrução de sistema):**\n",
+            "## Step 1 — Generating the SOURCE block\n",
+            "> Before coding, the AI creates the bibliographic header of the document.\n",
+            "**Sent to the model (system instruction):**\n",
             _blockquote(call.system),
             "",
-            "**Enviado (mensagem do usuário):**\n",
+            "**Sent (user message):**\n",
             _blockquote(call.user),
             "",
-            f"**Resposta da IA** *(latência: {_ms(call.latency_ms)})*:\n",
+            f"**AI response** *(latency: {_ms(call.latency_ms)})*:\n",
             _code_block(call.raw, "synesis"),
             "",
             "---\n",
@@ -411,46 +411,46 @@ class DebugRecorder:
         bibref = ctx[3] if ctx and len(ctx) > 3 else None
         suffix = f" — @{bibref}" if bibref else ""
 
-        lines = [f"### {self.unit_label} {idx + 1} de {total}{suffix}\n"]
+        lines = [f"### {self.unit_label} {idx + 1} of {total}{suffix}\n"]
 
         if gen_call:
-            lines.append("**Instrução de sistema enviada (com suas GUIDELINES):**\n")
+            lines.append("**System instruction sent (with its GUIDELINES):**\n")
             lines.append(_blockquote(gen_call.system))
             lines.append("")
-            lines.append("**Mensagem do usuário enviada:**\n")
+            lines.append("**User message sent:**\n")
             lines.append(_blockquote(gen_call.user))
             lines.append("")
             lines.append(
-                f"**Resposta bruta da IA** *(latência: {_ms(gen_call.latency_ms)} · "
-                f"tokens: entrada {gen_call.input_tokens:,} · "
-                f"saída {gen_call.output_tokens:,})*:\n".replace(",", ".")
+                f"**Raw AI response** *(latency: {_ms(gen_call.latency_ms)} · "
+                f"tokens: input {gen_call.input_tokens:,} · "
+                f"output {gen_call.output_tokens:,})*:\n"
             )
             lines.append(_code_block(gen_call.raw, "synesis"))
             lines.append("")
 
-        lines.append("#### Verificação pelo compilador Synesis\n")
+        lines.append("#### Check by the Synesis compiler\n")
 
         fix_i = 0
         corrections = 0
         for v in validations:
             if v.success:
                 lines.append(
-                    f"✅ **Tentativa {v.attempt + 1} — validação bem-sucedida.** "
-                    "O ITEM é válido.\n"
+                    f"✅ **Attempt {v.attempt + 1} — validation succeeded.** "
+                    "The ITEM is valid.\n"
                 )
                 continue
 
             problems = v.diagnostics
             n = len(problems) if problems else 1
-            plural = "problema encontrado" if n == 1 else "problemas encontrados"
-            lines.append(f"🔴 **Tentativa {v.attempt + 1} — {n} {plural}:**\n")
+            plural = "problem found" if n == 1 else "problems found"
+            lines.append(f"🔴 **Attempt {v.attempt + 1} — {n} {plural}:**\n")
             if problems:
                 for _cat, friendly in problems:
                     lines.append(f"- {friendly}")
             elif v.raw_diagnostic:
                 lines.append(
-                    "- A IA produziu texto que não segue a sintaxe Synesis "
-                    "(possivelmente markdown ou bloco incompleto)."
+                    "- The AI produced text that does not follow the Synesis syntax "
+                    "(probably markdown or an incomplete block)."
                 )
             lines.append("")
 
@@ -460,12 +460,12 @@ class DebugRecorder:
                 fix_i += 1
                 corrections += 1
                 lines.append(
-                    f"> A IA será solicitada a corrigir "
-                    f"(temperatura {fc.temperature})."
+                    f"> The AI will be asked to fix it "
+                    f"(temperature {fc.temperature})."
                 )
                 lines.append("")
                 lines.append(
-                    f"**Resposta da correção** *(latência: {_ms(fc.latency_ms)})*:\n"
+                    f"**Correction response** *(latency: {_ms(fc.latency_ms)})*:\n"
                 )
                 lines.append(_code_block(fc.raw, "synesis"))
                 lines.append("")
@@ -475,39 +475,39 @@ class DebugRecorder:
         )
         if summary:
             lines.append(
-                f"**Resultado desta {self.unit_label.lower()}:** "
+                f"**Result of this {self.unit_label.lower()}:** "
                 f"{summary.items_generated} ITEM(s) "
-                f"gerado(s) · {summary.corrections} ciclo(s) de correção.\n"
+                f"generated · {summary.corrections} correction cycle(s).\n"
             )
         lines.append("---\n")
         return "\n".join(lines)
 
     def _render_footer(self) -> str:
         f = self._footer
-        lines = ["## Resumo da sessão\n", "| Métrica | Valor |", "|---|---|"]
+        lines = ["## Session summary\n", "| Metric | Value |", "|---|---|"]
         if f.get("total_chunks") is not None:
             unit_plural = (
-                "Referências processadas"
+                "References processed"
                 if self.unit_type == "entry"
-                else "Trechos processados"
+                else "Chunks processed"
             )
             lines.append(
                 f"| {unit_plural} | {f['total_chunks']} "
-                f"(OK: {f.get('total_ok', '?')}, falhas: {f.get('total_fail', '?')}) |"
+                f"(OK: {f.get('total_ok', '?')}, failures: {f.get('total_fail', '?')}) |"
             )
         if f.get("items_generated") is not None:
-            lines.append(f"| ITEMs gerados | {f['items_generated']} |")
+            lines.append(f"| ITEMs generated | {f['items_generated']} |")
         if f.get("items_dedup") is not None:
-            lines.append(f"| ITEMs após deduplicação | {f['items_dedup']} |")
+            lines.append(f"| ITEMs after deduplication | {f['items_dedup']} |")
         if f.get("tokens_line"):
             lines.append(f"| Tokens | {f['tokens_line']} |")
         if f.get("elapsed") is not None:
-            lines.append(f"| Tempo total | {f['elapsed']:.1f} s |")
+            lines.append(f"| Total time | {f['elapsed']:.1f} s |")
         if f.get("validation"):
-            lines.append(f"| **Validação final** | {f['validation']} |")
+            lines.append(f"| **Final validation** | {f['validation']} |")
         lines.append("")
         if f.get("output_file"):
-            lines.append(f"**Arquivo gerado:** `{f['output_file']}`")
+            lines.append(f"**Generated file:** `{f['output_file']}`")
         return "\n".join(lines)
 
 
@@ -527,7 +527,7 @@ def _code_block(text: str, lang: str = "") -> str:
 
 
 def _ms(value: float) -> str:
-    return f"{value:,.0f} ms".replace(",", ".")
+    return f"{value:,.0f} ms"
 
 
 def now_human() -> str:

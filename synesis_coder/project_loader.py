@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,6 +60,32 @@ def bibliography_kwargs(ctx: dict) -> Dict[str, Any]:
     if contents is None and ctx.get("bib_content"):
         contents = {"<bibliography>": ctx["bib_content"]}
     return _bibliography_kwargs(contents)
+
+
+def _project_questions(linked: Any) -> List[Tuple[str, str]]:
+    """Questões de competência do .synp, na ordem do arquivo.
+
+    `getattr`: compiladores anteriores ao bloco QUESTIONS não têm o atributo.
+    Linhas fora da forma `<id>: <texto>` já são erro de compilação e ficam de fora.
+    """
+    if not linked:
+        return []
+    questions = getattr(linked.project, "questions", None) or []
+    return [(q.id, q.text) for q in questions if getattr(q, "id", "") and getattr(q, "text", "")]
+
+
+def _compose_project_context(
+    description: Optional[str], questions: List[Tuple[str, str]]
+) -> Optional[str]:
+    """DESCRIPTION seguido das questões de competência, quando houver."""
+    if not questions:
+        return description or None
+    lines = [
+        "Competency questions (what this project's structure must allow to answer):",
+        *[f"- {qid}: {text}" for qid, text in questions],
+    ]
+    block = "\n".join(lines)
+    return f"{description.strip()}\n\n{block}" if description else block
 
 
 def load_project(
@@ -122,7 +149,7 @@ def load_project(
     """
     project_path = Path(project_path).resolve()
     if not project_path.exists():
-        raise FileNotFoundError(f"Projeto não encontrado: {project_path}")
+        raise FileNotFoundError(f"Project not found: {project_path}")
 
     project_content = project_path.read_text(encoding="utf-8")
     base_dir = project_path.parent
@@ -130,7 +157,7 @@ def load_project(
     # Localizar template referenciado no .synp
     template_path = _resolve_template_path(project_content, base_dir)
     if not template_path.exists():
-        raise FileNotFoundError(f"Template não encontrado: {template_path}")
+        raise FileNotFoundError(f"Template not found: {template_path}")
     template_content = template_path.read_text(encoding="utf-8")
 
     # Coletar includes — .bib sempre carregado (necessário para validação)
@@ -179,7 +206,7 @@ def load_project(
         else:
             diagnostics = result.get_diagnostics(verbose=False)
             raise ValueError(
-                f"Erro ao compilar projeto '{project_path.name}':\n{diagnostics}"
+                f"Error compiling project '{project_path.name}':\n{diagnostics}"
             )
 
     field_specs = result.template.field_specs
@@ -260,10 +287,14 @@ def load_project(
     bib_keys: List[str] = sorted(result.bibliography.keys()) if result.bibliography else []
     bib_entries: Dict[str, dict] = dict(result.bibliography) if result.bibliography else {}
 
-    # Descrição do projeto (já processada pelo compilador)
-    project_description: Optional[str] = None
-    if linked and linked.project.description:
-        project_description = linked.project.description
+    # Descrição do projeto (já processada pelo compilador) e questões de
+    # competência (bloco QUESTIONS, synesis >= 0.15). As questões entram no mesmo
+    # contexto do DESCRIPTION, que todo prompt já leva como "PROJECT CONTEXT"; um
+    # projeto sem QUESTIONS (ou um compilador sem o bloco) gera o texto de sempre.
+    project_questions = _project_questions(linked)
+    project_description = _compose_project_context(
+        linked.project.description if linked else None, project_questions
+    )
 
     return {
         "result": result,
@@ -287,6 +318,7 @@ def load_project(
         "bib_keys": bib_keys,
         "bib_entries": bib_entries,  # campos de cada entrada (ex.: abstract p/ o SOURCE)
         "project_description": project_description,
+        "project_questions": project_questions,  # [(id, texto)] do bloco QUESTIONS
         "project_content": project_content,
         "template_content": template_content,
         "bib_content": bib_content,
@@ -338,10 +370,10 @@ def assert_bibref_known(ctx: dict, bibref: str) -> None:
             return
 
         raise ValueError(
-            f"Bibref '@{key}' não pôde ser validado: o projeto declara "
-            "INCLUDE BIBLIOGRAPHY no arquivo .synp mas a bibliografia (.bib) "
-            "não carregou nenhuma chave. Verifique se o arquivo .bib existe "
-            "e não está vazio."
+            f"Bibref '@{key}' could not be validated: the project declares "
+            "INCLUDE BIBLIOGRAPHY in the .synp file but the bibliography (.bib) "
+            "loaded no key. Check that the .bib file exists "
+            "and is not empty."
         )
 
     # Amostra das chaves disponíveis (todas se forem poucas)
@@ -351,19 +383,19 @@ def assert_bibref_known(ctx: dict, bibref: str) -> None:
         sample_str += f", … (+{len(bib_keys) - 20} outras)"
 
     lines = [
-        f"Bibref '@{key}' não existe na bibliografia do projeto "
-        f"({len(bib_keys)} chave(s) disponível(is)).",
-        f"Chaves disponíveis: {sample_str}",
+        f"Bibref '@{key}' does not exist in the project bibliography "
+        f"({len(bib_keys)} key(s) available).",
+        f"Available keys: {sample_str}",
     ]
 
     description = ctx.get("project_description")
     if description:
         lines.append(
-            "Convenção do projeto (DESCRIPTION do .synp):\n" + description.strip()
+            "Project convention (DESCRIPTION of the .synp):\n" + description.strip()
         )
 
     lines.append(
-        "Informe um --bibref que corresponda exatamente a uma chave do .bib."
+        "Give a --bibref that matches a .bib key exactly."
     )
 
     raise ValueError("\n".join(lines))
@@ -396,12 +428,12 @@ def assert_input_keys_in_project(ctx: dict, keys: List[str], input_name: str) ->
     if len(missing) > 10:
         sample += f", … (+{len(missing) - 10})"
     raise ValueError(
-        f"{len(missing)} de {len(keys)} referência(s) de '{input_name}' não estão na "
-        f"bibliografia do projeto: {sample}.\n"
-        "O coder valida cada saída contra o INCLUDE BIBLIOGRAPHY do .synp, não contra "
-        "o --input. Inclua o arquivo no projeto — por exemplo "
-        'INCLUDE BIBLIOGRAPHY "Sources" (a pasta inteira, synesis >= 0.13) — e rode de novo.\n'
-        "Nenhuma chamada ao modelo foi feita."
+        f"{len(missing)} of {len(keys)} reference(s) of '{input_name}' are not in the "
+        f"project bibliography: {sample}.\n"
+        "The coder validates each output against the .synp's INCLUDE BIBLIOGRAPHY, not against "
+        "the --input. Include the file in the project — for example "
+        'INCLUDE BIBLIOGRAPHY "Sources" (the whole folder, synesis >= 0.13) — and run again.\n'
+        "No model call was made."
     )
 
 
@@ -416,8 +448,52 @@ def _resolve_template_path(project_content: str, base_dir: Path) -> Path:
 
     match = re.search(r'TEMPLATE\s+"([^"]+)"', project_content, re.IGNORECASE)
     if not match:
-        raise ValueError("Diretiva TEMPLATE não encontrada no arquivo .synp")
+        raise ValueError("TEMPLATE directive not found in the .synp file")
     return base_dir / match.group(1)
+
+
+def project_include_files(project_path: Path) -> List[Dict[str, Any]]:
+    """Arquivos incluídos pelo .synp, com o que importa para gravar neles.
+
+    Cada item: {"type", "path" (resolvido), "key" (como em _collect_includes),
+    "shared" (INCLUDE SHARED), "single" (o INCLUDE cita um arquivo, não pasta nem
+    padrão)}. A expansão é a do compilador; INCLUDE comentado não conta.
+    """
+    project_path = Path(project_path)
+    content = project_path.read_text(encoding="utf-8")
+    base_dir = project_path.parent
+    pattern = re.compile(
+        r'^[ \t]*INCLUDE\s+(SHARED\s+)?(ANNOTATIONS|ONTOLOGY|BIBLIOGRAPHY)\s+"([^"]+)"',
+        re.IGNORECASE | re.MULTILINE,
+    )
+    from synesis.parser.paths import has_glob, resolve_include
+
+    out: List[Dict[str, Any]] = []
+    for match in pattern.finditer(content):
+        shared = match.group(1) is not None
+        include_type = match.group(2).upper()
+        raw = match.group(3)
+        if _expand_include is not None:
+            expansion = _expand_include(
+                base_dir, raw, _INCLUDE_EXTENSIONS.get(include_type), shared=shared,
+            )
+            paths = list(expansion.files)
+            single = getattr(expansion, "kind", "file") == "file"
+        else:
+            resolution = resolve_include(base_dir, raw, shared=shared)
+            paths = [resolution.path] if resolution.error is None else []
+            single = not has_glob(raw)
+        for path in paths:
+            path = Path(path).resolve()
+            try:
+                key = path.relative_to(base_dir.resolve()).as_posix()
+            except ValueError:
+                key = path.name
+            out.append({
+                "type": include_type, "path": path, "key": key,
+                "shared": shared, "single": single,
+            })
+    return out
 
 
 def _collect_includes(
@@ -578,9 +654,9 @@ def _load_dataset(
             for key, record in load_dataset(path, key_path=key_path, base_dir=base_dir).items():
                 if key in index:
                     raise ValueError(
-                        f"Chave de dataset '{key}' repetida em "
-                        f"'{index[key].get(SOURCE_FILE_KEY)}' e '{path}'. "
-                        "Cada registro precisa de uma chave única no projeto."
+                        f"Dataset key '{key}' repeated in "
+                        f"'{index[key].get(SOURCE_FILE_KEY)}' and '{path}'. "
+                        "Each record needs a unique key in the project."
                     )
                 index[key] = record
     return index
@@ -719,7 +795,7 @@ def _split_and_tolerate_errors(result, annotation_contents: dict, project_path: 
             f"       - {n}x {msg}" for msg, n in counts.most_common()
         )
         logger.warning(
-            "Ignorando anotações anteriores (%d erros sob o template atual):\n%s",
+            "Ignoring previous annotations (%d errors under the current template):\n%s",
             len(tolerated_errors), bullet_lines,
         )
 
@@ -732,5 +808,5 @@ def _split_and_tolerate_errors(result, annotation_contents: dict, project_path: 
         )
         diagnostics = fatal_result.to_diagnostics(verbose=False)
         raise ValueError(
-            f"Erro ao compilar projeto '{project_path.name}':\n{diagnostics}"
+            f"Error compiling project '{project_path.name}':\n{diagnostics}"
         )

@@ -14,6 +14,7 @@ d:\\GitHub\\case-studies\\.
 from __future__ import annotations
 
 import textwrap
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -92,6 +93,34 @@ def _make_ctx(
     }
 
 
+def _text_field():
+    """FieldSpec mínimo de um campo TEXT do ONTOLOGY (gerável pelo modo)."""
+    from synesis.ast.nodes import FieldType
+
+    spec = MagicMock()
+    spec.type = FieldType.TEXT
+    return spec
+
+
+@contextmanager
+def _standalone_destination(output):
+    """Destino fora do projeto (validação só contra o template), sem disco.
+
+    Os testes de fluxo usam um .synp fictício; a resolução do destino, o
+    instantâneo das entradas e a validação do conjunto ficam simulados aqui e
+    são testados de verdade em test_ontology_publish.py.
+    """
+    from synesis_coder.modes import ontology_mode
+    from synesis_coder.ontology_publish import Destination
+
+    snapshot = MagicMock()
+    snapshot.changed.return_value = (False, [])
+    destination = Destination(path=Path(output).resolve(), key=Path(output).name, in_project=False)
+    with patch.object(ontology_mode, "resolve_destination", return_value=destination),          patch.object(ontology_mode.InputSnapshot, "take", return_value=snapshot),          patch.object(ontology_mode, "validate_changes",
+                      side_effect=lambda ctx, d, o, build, changed, **kw: (build(changed), {})):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # TestGetPendingCodes
 # ---------------------------------------------------------------------------
@@ -153,6 +182,7 @@ class TestUpdatePreservesExistingEntries:
         ctx = _make_ctx(
             code_index_codes=["curada_a", "curada_b", "nova_c"],
             ontology_index={"curada_a": MagicMock(), "curada_b": MagicMock()},
+            ontology_fields={"ontology_description": _text_field()},
         )
         novo_bloco = "ONTOLOGY nova_c\n  ontology_description: Z\nEND ONTOLOGY"
 
@@ -162,7 +192,7 @@ class TestUpdatePreservesExistingEntries:
         with patch.object(ontology_mode, "load_project", return_value=ctx), \
              patch.object(ontology_mode, "LLMClient", MagicMock()), \
              patch.object(ontology_mode, "runtime_banner", MagicMock()), \
-             patch.object(ontology_mode, "_process_one_code", fake_process_one):
+             patch.object(ontology_mode, "_process_one_code", fake_process_one),              _standalone_destination(output):
             asyncio.run(
                 ontology_mode._process_ontology_async(
                     project_path=Path("dummy.synp"),
@@ -503,7 +533,7 @@ class TestOntologyValidationIsTemplateOnly:
         llm.fix.side_effect = lambda output, *a, **k: output  # correção inócua
         output, ok = validate_ontology_entry(entry, ctx, llm, max_tries=1)
         assert ok is False
-        assert output.startswith("# ERRO: validação falhou")
+        assert output.startswith("# ERROR: validation failed")
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +624,10 @@ class TestStaleOntologyDoesNotBlockRegeneration:
 
         from synesis_coder.modes import ontology_mode
 
-        ctx = _make_ctx(code_index_codes=["a"], ontology_index={})
+        ctx = _make_ctx(
+            code_index_codes=["a"], ontology_index={},
+            ontology_fields={"ontology_description": _text_field()},
+        )
         captured: dict = {}
 
         def fake_load(project_path, **kwargs):
@@ -609,7 +642,7 @@ class TestStaleOntologyDoesNotBlockRegeneration:
         with patch.object(ontology_mode, "load_project", fake_load), \
              patch.object(ontology_mode, "LLMClient", MagicMock()), \
              patch.object(ontology_mode, "runtime_banner", MagicMock()), \
-             patch.object(ontology_mode, "_process_one_code", fake_process_one):
+             patch.object(ontology_mode, "_process_one_code", fake_process_one),              _standalone_destination(tmp_path / "out.syno"):
             result = asyncio.run(
                 ontology_mode._process_ontology_async(
                     project_path=Path("dummy.synp"),
@@ -628,22 +661,24 @@ class TestStaleOntologyDoesNotBlockRegeneration:
         captured, _ = self._run(update=False, tmp_path=tmp_path)
         assert captured["load_ontology"] is False
 
-    def test_update_still_loads_the_old_ontology(self, tmp_path):
-        """Em --update o arquivo e preservado e anexado: precisa ser valido."""
+    def test_update_does_not_compile_the_old_ontology_either(self, tmp_path):
+        """A0a: o destino e lido como texto e mesclado por bloco. Exigir que a
+        ontologia antiga compile impediria `--update` de completar justamente
+        um bloco ao qual falta campo REQUIRED."""
         captured, _ = self._run(update=True, tmp_path=tmp_path)
-        assert captured["load_ontology"] is True
+        assert captured["load_ontology"] is False
 
     def test_stale_annotations_are_tolerated(self, tmp_path):
         captured, _ = self._run(update=False, tmp_path=tmp_path)
         assert captured["tolerate_annotation_errors"] is True
 
-    def test_update_failure_explains_how_to_proceed(self, tmp_path):
-        err = ValueError("=== ERROS ===\n[!] `aspect: Economico` — em ORDERED grave o indice")
+    def test_update_load_failure_is_not_rewritten(self, tmp_path):
+        """Com a ontologia fora da carga, um erro de carga e do template ou do
+        projeto: sai como veio, sem sugerir rodar sem --update."""
+        err = ValueError("template invalido")
         with pytest.raises(ValueError) as excinfo:
             self._run(update=True, tmp_path=tmp_path, load_side_effect=err)
-        msg = str(excinfo.value)
-        assert "SEM `--update`" in msg
-        assert "aspect: Economico" in msg  # preserva o diagnostico original
+        assert str(excinfo.value) == "template invalido"
 
     def test_full_regeneration_failure_is_not_rewritten(self, tmp_path):
         """Sem --update, um erro de carga e um erro real: nao mascarar."""

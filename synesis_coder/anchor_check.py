@@ -40,8 +40,8 @@ class AnchorIssue(NamedTuple):
         """Mensagem de uma linha, no estilo das diagnósticas da CLI."""
         shown = self.excerpt if len(self.excerpt) <= 60 else self.excerpt[:57] + "..."
         return (
-            f"linha {self.line}: ITEM @{self.bibref} — trecho não localizado "
-            f"na fonte: {shown!r}"
+            f"line {self.line}: ITEM @{self.bibref} — excerpt not found "
+            f"in the source: {shown!r}"
         )
 
 
@@ -148,17 +148,17 @@ def format_report(
     aviso = ""
     if without_excerpt:
         nomes = ", ".join(fields or [])
-        aviso = (f"\n  ⚠ {without_excerpt} de {total_items} ITEM(s) sem trecho em "
-                 f"[{nomes}] — não verificados.")
+        aviso = (f"\n  ⚠ {without_excerpt} of {total_items} ITEM(s) without an excerpt in "
+                 f"[{nomes}] — not checked.")
     if not issues:
         verificados = total_items - without_excerpt
-        return (f"Ancoragem: {verificados} ITEM(s) verificado(s), nenhum problema."
+        return (f"Anchoring: {verificados} ITEM(s) checked, no problems."
                 + aviso)
 
     rate = len(issues) / total_items if total_items else 0.0
     header = (
-        f"Ancoragem: {len(issues)} de {total_items} ITEM(s) "
-        f"({rate:.1%}) com trecho não localizado na fonte:"
+        f"Anchoring: {len(issues)} of {total_items} ITEM(s) "
+        f"({rate:.1%}) with an excerpt not found in the source:"
     )
     body = "\n".join(f"  {i.to_line()}" for i in issues)
     return header + "\n" + body + aviso

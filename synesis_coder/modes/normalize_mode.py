@@ -373,7 +373,7 @@ def _apply_llm_suggestions(
     for suggestion in suggestions:
         if suggestion.merge_confidence < confidence_threshold:
             _log.debug(
-                "Sugestão LLM ignorada (confiança %.2f < %.2f): %s → %s",
+                "LLM suggestion ignored (confidence %.2f < %.2f): %s → %s",
                 suggestion.merge_confidence, confidence_threshold,
                 suggestion.group_codes, suggestion.suggested_canonical,
             )
@@ -388,7 +388,7 @@ def _apply_llm_suggestions(
                     inventory[nkey].llm_suggested = True
                     updated += 1
                     _log.debug(
-                        "LLM: %r → %r (era: %r, confiança: %.2f)",
+                        "LLM: %r → %r (was: %r, confidence: %.2f)",
                         code, suggestion.suggested_canonical, old_canonical,
                         suggestion.merge_confidence,
                     )
@@ -555,7 +555,7 @@ async def _process_normalize_async(
     resolved_project = _resolve_project(first_path, project_path)
     if resolved_project is None:
         raise FileNotFoundError(
-            "Projeto .synp não encontrado. Use --project para especificá-lo."
+            ".synp project not found. Use --project to set it."
         )
     ctx = load_project(resolved_project)
 
@@ -564,16 +564,16 @@ async def _process_normalize_async(
     for p in synr_paths:
         p = Path(p).resolve()
         if not p.exists():
-            raise FileNotFoundError(f"Arquivo não encontrado: {p}")
+            raise FileNotFoundError(f"File not found: {p}")
         docs_with_paths.append((p, parse_synr(p)))
 
-    _log.info("Normalize: %d arquivo(s) lido(s)", len(docs_with_paths))
+    _log.info("Normalize: %d file(s) read", len(docs_with_paths))
 
     # 3. Construir inventário global
     term_fields = term_fields_from_ctx(ctx)
     inventory = build_code_inventory(docs_with_paths, term_fields)
     total_codes = len(inventory)
-    _log.info("Inventário: %d código(s) único(s) encontrado(s)", total_codes)
+    _log.info("Inventory: %d unique code(s) found", total_codes)
 
     # 4. Normalização determinística
     apply_deterministic_normalization(inventory)
@@ -583,7 +583,7 @@ async def _process_normalize_async(
         if len(g.variants) > 1
     ]
     _log.info(
-        "Determinístico: %d resolvido(s), %d grupo(s) residual(is)",
+        "Deterministic: %d resolved, %d residual group(s)",
         resolved_deterministic, len(residual_groups),
     )
 
@@ -595,8 +595,8 @@ async def _process_normalize_async(
     )
     if candidatos:
         _log.info(
-            "%d grupo(s) de possíveis variantes (flexão/separador/acento) — "
-            "só diagnóstico, nada foi substituído; ver o inventário.",
+            "%d group(s) of possible variants (inflection/separator/accent) — "
+            "diagnostic only, nothing was replaced; see the inventory.",
             len(candidatos),
         )
 
@@ -621,12 +621,12 @@ async def _process_normalize_async(
                 try:
                     raw = await llm_client.call_async(messages, temperature=0.0, thinking=False)
                 except Exception as exc:
-                    _log.error("Falha LLM em chunk de normalização: %s", exc)
+                    _log.error("LLM failure in a normalization chunk: %s", exc)
                     return []
                 return _parse_normalization_response(raw)
 
         # Wrapper de progresso: ver nota equivalente em critique_mode.
-        progress = BatchProgress(len(chunks), unit="lote", usage=llm_client.usage)
+        progress = BatchProgress(len(chunks), unit="batch", usage=llm_client.usage)
         progress.start()
 
         async def _tracked(chunk):
@@ -638,7 +638,7 @@ async def _process_normalize_async(
         all_suggestions = [s for chunk in chunk_results for s in chunk]
 
         llm_updates = _apply_llm_suggestions(inventory, all_suggestions, confidence_threshold)
-        _log.info("LLM: %d sugestão(ões) aplicada(s)", llm_updates)
+        _log.info("LLM: %d suggestion(s) applied", llm_updates)
 
     # 7. Gerar revisões por arquivo e escrever .synr
     import datetime
@@ -672,14 +672,14 @@ async def _process_normalize_async(
             "metrics.residual_groups": str(len(residual_groups)),
             "metrics.llm_canonicals": str(llm_updates),
             "metrics.llm_canonicals.description": (
-                "grupos onde normalizacao deterministica foi insuficiente "
-                "e sugestao LLM foi aceita acima de confidence_threshold"
+                "groups where deterministic normalization was not enough "
+                "and the LLM suggestion was accepted above confidence_threshold"
             ),
             "metrics.corpus_items_revised": str(items_revised),
             "metrics.normalization_rate": f"{normalization_rate:.3f}",
             "metrics.normalization_rate.formula": "corpus_items_revised / corpus_items_total",
             "metrics.normalization_rate.description": (
-                "proporcao de ITEMs do corpus com pelo menos um codigo normalizado"
+                "share of corpus ITEMs with at least one normalized code"
             ),
         }
 
@@ -698,26 +698,26 @@ async def _process_normalize_async(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         write_synr(out_path, synr_doc)
         files_updated += 1
-        _log.info("Escrito: %s (%d revisão/ões)", out_path.name, n_revised)
+        _log.info("Written: %s (%d revision(s))", out_path.name, n_revised)
 
     elapsed = time.monotonic() - start_time
 
     summary = (
-        f"Normalize concluído em {elapsed:.1f}s\n"
-        f"  Arquivos:  {len(docs_with_paths)} entrada(s) | {files_updated} saída(s)\n"
-        f"  Códigos:   {total_codes} únicos | {len(residual_groups)} grupos residuais\n"
-        f"  Revisões:  {items_revised} ITEM(s) com sugestão de normalização\n"
+        f"Normalize finished in {elapsed:.1f}s\n"
+        f"  Files:     {len(docs_with_paths)} input(s) | {files_updated} output(s)\n"
+        f"  Codes:     {total_codes} unique | {len(residual_groups)} residual groups\n"
+        f"  Revisions: {items_revised} ITEM(s) with a normalization suggestion\n"
         f"  LLM:       {llm_updates} canonicals via LLM\n"
-        f"  Modelo:    {llm_client.model}\n"
+        f"  Model:     {llm_client.model}\n"
         f"  {llm_client.usage.summary_line()}"
     )
 
     if format == "verbose":
         header_str = (
             f"# synesis-coder normalize\n"
-            f"# arquivos: {len(docs_with_paths)}\n"
-            f"# códigos: {total_codes} únicos\n"
-            f"# modelo: {llm_client.model} | confiança mínima: {confidence_threshold}\n"
+            f"# files: {len(docs_with_paths)}\n"
+            f"# codes: {total_codes} unique\n"
+            f"# model: {llm_client.model} | minimum confidence: {confidence_threshold}\n"
             f"# {llm_client.usage.summary_line()}\n"
         )
         return header_str + "\n" + summary
@@ -738,12 +738,12 @@ def _write_inventory_txt(
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Synesis-Coder Code Inventory",
-        f"# Grupos: {len(inventory)}",
+        f"# Groups: {len(inventory)}",
         "",
     ]
     for nkey, group in sorted(inventory.items()):
-        canonical = group.canonical or "(não resolvido)"
-        source = "LLM" if group.llm_suggested else "determinístico"
+        canonical = group.canonical or "(unresolved)"
+        source = "LLM" if group.llm_suggested else "deterministic"
         total = sum(group.variants.values())
         lines.append(f"[{nkey}] canonical={canonical} source={source} total={total}")
         for form, count in sorted(group.variants.items(), key=lambda x: -x[1]):
@@ -752,8 +752,8 @@ def _write_inventory_txt(
     if candidates:
         lines += [
             "",
-            "# Possíveis variantes (flexão, separador, acento) — DIAGNÓSTICO.",
-            "# Nada foi substituído: a equivalência depende do sentido (ex.: pais × país).",
+            "# Possible variants (inflection, separator, accent) — DIAGNOSTIC.",
+            "# Nothing was replaced: the equivalence depends on meaning (e.g. pais × país).",
         ]
         lines += ["  " + " | ".join(g) for g in candidates]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -69,8 +69,8 @@ def _get_anthropic_api_key() -> str:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise EnvironmentError(
-            "ANTHROPIC_API_KEY não encontrada. "
-            "Crie um arquivo .env baseado em .env.example e defina sua chave."
+            "ANTHROPIC_API_KEY not found. "
+            "Create a .env file based on .env.example and set your key."
         )
     return key
 
@@ -139,13 +139,13 @@ def get_concurrent(default: int) -> int:
         value = int(raw)
     except ValueError:
         _log.warning(
-            "SYNESIS_CODER_CONCURRENT=%r não é um número inteiro — usando %d.",
+            "SYNESIS_CODER_CONCURRENT=%r is not an integer — using %d.",
             raw, default,
         )
         return default
     if value < 1:
         _log.warning(
-            "SYNESIS_CODER_CONCURRENT=%d é inválido (mínimo 1) — usando %d.",
+            "SYNESIS_CODER_CONCURRENT=%d is invalid (minimum 1) — using %d.",
             value, default,
         )
         return default
@@ -246,7 +246,7 @@ def _anthropic_sdk_supports_output_config() -> bool:
         params = inspect.signature(Messages.create).parameters
         supported = "output_config" in params
     except Exception as exc:
-        _log.debug("Não foi possível inspecionar o SDK anthropic: %s", exc)
+        _log.debug("Could not inspect the anthropic SDK: %s", exc)
         supported = False
 
     _anthropic_output_config_support = supported
@@ -337,9 +337,9 @@ class EmptyProviderResponse(RuntimeError):
 
     def __init__(self, error_payload: object = None) -> None:
         self.error_payload = error_payload
-        detail = f" (erro do provedor: {error_payload})" if error_payload else ""
+        detail = f" (provider error: {error_payload})" if error_payload else ""
         super().__init__(
-            f"resposta sem `choices` — falha transitória do provedor{detail}"
+            f"response without `choices` — transient provider failure{detail}"
         )
 
 
@@ -360,7 +360,7 @@ class TokenBudgetExhausted(RuntimeError):
         self.block_types = block_types
         self.max_tokens = max_tokens
         super().__init__(
-            f"resposta sem bloco text (tipos: {block_types}) e truncada por "
+            f"response without a text block (types: {block_types}) and truncated by "
             f"max_tokens={max_tokens}"
         )
 
@@ -873,8 +873,8 @@ class LLMClient:
                 self._log_budget_exhausted(exc, retried=False)
                 return None
             _log.warning(
-                "Orçamento de tokens esgotado no raciocínio (tipos: %s, "
-                "max_tokens=%d) — repetindo o caminho JSON com max_tokens=%d.",
+                "Token budget exhausted in reasoning (types: %s, "
+                "max_tokens=%d) — retrying the JSON path with max_tokens=%d.",
                 exc.block_types, exc.max_tokens, retry_tokens,
             )
             self._wait_if_rate_limited()
@@ -889,7 +889,7 @@ class LLMClient:
                 return None
         except EmptyProviderResponse as exc:
             # Falha transitória de infraestrutura — ver nota em call_json_async.
-            _log.warning("Caminho JSON: %s — repetindo uma vez.", exc)
+            _log.warning("JSON path: %s — retrying once.", exc)
             self._wait_if_rate_limited()
             self._correction_local.is_correction = correction
             try:
@@ -898,15 +898,15 @@ class LLMClient:
                 )
             except Exception as exc2:
                 _log.warning(
-                    "Re-tentativa também falhou (%s) — caindo para texto livre.",
+                    "Retry also failed (%s) — falling back to free text.",
                     exc2,
                 )
                 self.usage.record_schema_fallback()
                 return None
         except Exception as exc:
             _log.warning(
-                "Caminho JSON falhou na chamada ao backend (%s) — "
-                "caindo para texto livre.", exc,
+                "JSON path failed in the backend call (%s) — "
+                "falling back to free text.", exc,
             )
             self.usage.record_schema_fallback()
             return None
@@ -926,7 +926,7 @@ class LLMClient:
                 thinking=False, schema=schema,
             )
         except Exception as exc:
-            _log.warning("Re-tentativa do caminho JSON falhou (%s).", exc)
+            _log.warning("JSON path retry failed (%s).", exc)
             self.usage.record_schema_fallback()
             return None
 
@@ -948,15 +948,15 @@ class LLMClient:
         """
         if retried:
             _log.error(
-                "Resposta não-JSON também na re-tentativa. O registro será "
-                "gerado em TEXTO LIVRE, sem as garantias do schema (enum, "
+                "Non-JSON response on the retry too. The record will be "
+                "generated as FREE TEXT, without the schema guarantees (enum, "
                 "minimum/maximum, additionalProperties)."
             )
             self.usage.record_schema_fallback()
         else:
             _log.warning(
-                "Resposta do caminho JSON não é um objeto JSON válido — "
-                "repetindo uma vez com temperature=%s.",
+                "JSON path response is not a valid JSON object — "
+                "retrying once with temperature=%s.",
                 _MALFORMED_JSON_RETRY_TEMPERATURE,
             )
 
@@ -968,11 +968,11 @@ class LLMClient:
         tokens já gastos são descartados E o registro perde as garantias
         estruturais do schema silenciosamente.
         """
-        suffix = " mesmo após aumentar max_tokens" if retried else ""
+        suffix = " even after raising max_tokens" if retried else ""
         _log.error(
-            "Caminho JSON abandonado%s (%s). O registro será gerado em TEXTO "
-            "LIVRE, sem as garantias do schema (enum, minimum/maximum, "
-            "additionalProperties). Aumente SYNESIS_CODER_MAX_TOKENS.",
+            "JSON path abandoned%s (%s). The record will be generated as FREE "
+            "TEXT, without the schema guarantees (enum, minimum/maximum, "
+            "additionalProperties). Raise SYNESIS_CODER_MAX_TOKENS.",
             suffix, exc,
         )
         self.usage.record_schema_fallback()
@@ -1018,8 +1018,8 @@ class LLMClient:
                 self._log_budget_exhausted(exc, retried=False)
                 return None
             _log.warning(
-                "Orçamento de tokens esgotado no raciocínio (tipos: %s, "
-                "max_tokens=%d) — repetindo o caminho JSON com max_tokens=%d.",
+                "Token budget exhausted in reasoning (types: %s, "
+                "max_tokens=%d) — retrying the JSON path with max_tokens=%d.",
                 exc.block_types, exc.max_tokens, retry_tokens,
             )
             await self._async_wait_if_rate_limited()
@@ -1035,22 +1035,22 @@ class LLMClient:
             # bastar, e desistir aqui custaria as garantias do schema por um
             # problema que não é do schema nem do modelo.
             _log.warning(
-                "Caminho JSON (async): %s — repetindo uma vez.", exc,
+                "JSON path (async): %s — retrying once.", exc,
             )
             await self._async_wait_if_rate_limited()
             try:
                 raw = await asyncio.to_thread(_call_in_thread, max_tokens)
             except Exception as exc2:
                 _log.warning(
-                    "Re-tentativa também falhou (%s) — caindo para texto livre.",
+                    "Retry also failed (%s) — falling back to free text.",
                     exc2,
                 )
                 self.usage.record_schema_fallback()
                 return None
         except Exception as exc:
             _log.warning(
-                "Caminho JSON (async) falhou na chamada ao backend (%s) — "
-                "caindo para texto livre.", exc,
+                "JSON path (async) failed in the backend call (%s) — "
+                "falling back to free text.", exc,
             )
             self.usage.record_schema_fallback()
             return None
@@ -1069,7 +1069,7 @@ class LLMClient:
                 _MALFORMED_JSON_RETRY_TEMPERATURE,
             )
         except Exception as exc:
-            _log.warning("Re-tentativa do caminho JSON falhou (%s).", exc)
+            _log.warning("JSON path retry failed (%s).", exc)
             self.usage.record_schema_fallback()
             return None
 
@@ -1102,11 +1102,11 @@ class LLMClient:
                 # default 0, e o `cap > 0` abaixo estoura TypeError.
                 cap = _int_attr(model_info, "max_tokens")
         except Exception as exc:
-            _log.debug("Não foi possível obter teto do modelo '%s': %s", self.model, exc)
+            _log.debug("Could not get the model's output cap '%s': %s", self.model, exc)
 
         self._model_output_cap = cap
         if cap > 0:
-            _log.debug("Teto de output do modelo '%s': %d tokens", self.model, cap)
+            _log.debug("Model output cap '%s': %d tokens", self.model, cap)
         return cap
 
     def _call_sync_inner(
@@ -1154,7 +1154,7 @@ class LLMClient:
             dynamic = _estimate_max_tokens(messages, model_cap)
             if dynamic != max_tokens:
                 _log.debug(
-                    "max_tokens dinâmico: %d (cap=%d)", dynamic, model_cap
+                    "dynamic max_tokens: %d (cap=%d)", dynamic, model_cap
                 )
             max_tokens = dynamic
 
@@ -1306,10 +1306,10 @@ class LLMClient:
                         raise
                     self._anthropic_caps = caps_without(self._caps(), fix)
                     warn_once(self.model, (
-                        f"O modelo '{self.model}' recusou "
+                        f"The model '{self.model}' rejected "
                         f"{'temperature' if fix[0] == 'temperature' else 'thinking.type=' + fix[1]}; "
-                        "a chamada foi repetida sem ele e a correção vale para a sessão. "
-                        "Atualize a tabela em anthropic_caps.py."
+                        "the call was repeated without it and the fix holds for the session. "
+                        "Update the table in anthropic_caps.py."
                     ))
                     kwargs = _build_kwargs()
                     response = self._anthropic_create(kwargs)
@@ -1317,8 +1317,8 @@ class LLMClient:
 
                 if response.stop_reason == "refusal":
                     _log.debug(
-                        "Anthropic recusou a geração estruturada (stop_reason=refusal) — "
-                        "caindo para texto livre."
+                        "Anthropic refused structured generation (stop_reason=refusal) — "
+                        "falling back to free text."
                     )
                 if response.stop_reason == "max_tokens":
                     _log.warning(
@@ -1340,8 +1340,8 @@ class LLMClient:
                     # tratar os dois casos de forma diferente.
                     raise TokenBudgetExhausted(block_types, kwargs["max_tokens"])
                 raise RuntimeError(
-                    f"Resposta Anthropic sem bloco text — "
-                    f"tipos recebidos: {block_types}"
+                    f"Anthropic response without a text block — "
+                    f"types received: {block_types}"
                 )
 
         if self.recorder is None:

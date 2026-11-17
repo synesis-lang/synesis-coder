@@ -86,8 +86,10 @@ def variant_key(label: str) -> tuple[str, ...]:
 
 
 def _contract_key(label: str) -> str:
-    """O que a LINGUAGEM considera igual (`normalize_code`): caixa e espaços."""
-    return " ".join(str(label).strip().split()).lower()
+    """O que a LINGUAGEM considera igual (`normalize_code`): NFC, caixa e espaços."""
+    from synesis_coder.identity import concept_key
+
+    return concept_key(label)
 
 
 def candidate_groups(labels: Iterable[str]) -> list[list[str]]:

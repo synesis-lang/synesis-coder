@@ -316,8 +316,15 @@ def safe_write_output(
     content: str,
     overwrite: bool = False,
     backup: bool = False,
+    newline: str | None = None,
 ) -> None:
     """Grava content em output_path com escrita atômica e proteção contra sobrescrita.
+
+    `newline` segue `open()`: None (padrão) traduz `\n` para o fim de linha do
+    sistema, como sempre; `""` grava o texto exatamente como veio. A mesclagem
+    por bloco usa `""`: ela já compõe o arquivo com os fins de linha do original,
+    e a tradução trocaria todo LF por CRLF no Windows (ou dobraria `\r` num
+    arquivo que já era CRLF), mudando bytes que a aplicação não tocou.
 
     Comportamento:
     - output_path não existe: grava diretamente (sem confirmação).
@@ -350,20 +357,20 @@ def safe_write_output(
     if output_path.exists() and not overwrite:
         if sys.stdin.isatty() and sys.stderr.isatty():
             # Modo interativo: perguntar ao usuário
-            sys.stderr.write(f"[PROMPT] {output_path.name} já existe. Sobrescrever? [y/N]: ")
+            sys.stderr.write(f"[PROMPT] {output_path.name} already exists. Overwrite? [y/N]: ")
             sys.stderr.flush()
             resp = sys.stdin.readline().strip().lower()
             confirmed = resp in ("s", "sim", "y", "yes")
             if not confirmed:
                 raise FileExistsError(
-                    f"Operação cancelada. '{output_path.name}' não foi modificado.\n"
-                    "Use --overwrite para sobrescrever sem confirmação."
+                    f"Operation cancelled. '{output_path.name}' was not modified.\n"
+                    "Use --overwrite to overwrite without confirmation."
                 )
         else:
             # Não-interativo (CI, pipe): abortar sem bloquear
             raise FileExistsError(
-                f"'{output_path.name}' já existe. Execute novamente com --overwrite "
-                "para sobrescrever (uso em scripts/CI requer a flag explícita)."
+                f"'{output_path.name}' already exists. Run again with --overwrite "
+                "to overwrite (scripts/CI require the explicit flag)."
             )
 
     # Backup do arquivo existente antes de qualquer escrita
@@ -378,7 +385,7 @@ def safe_write_output(
         suffix=".tmp",
     )
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline=newline) as fh:
             fh.write(content)
         os.replace(tmp_name, str(output_path))
     except BaseException:

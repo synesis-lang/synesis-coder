@@ -56,8 +56,8 @@ def _counter(usage, name: str) -> int:
 
 
 def _thousands(n: int) -> str:
-    """Inteiro com ponto como separador de milhar (convenção pt-BR)."""
-    return f"{n:,}".replace(",", ".")
+    """Inteiro com vírgula como separador de milhar (saída do CLI em inglês)."""
+    return f"{n:,}"
 
 
 def format_duration(seconds: float) -> str:
@@ -85,7 +85,7 @@ def campaign_summary(
     elapsed: float,
     output: str,
     llm_client=None,
-    unit: str = "registros",
+    unit: str = "records",
     skipped: int = 0,
     extra: Optional[list[tuple[str, str]]] = None,
 ) -> str:
@@ -121,19 +121,19 @@ def campaign_summary(
     lines = [
         "",
         sep,
-        f"  Campanha    {mode} · {project}",
+        f"  Campaign    {mode} · {project}",
     ]
 
     if llm_client is not None:
-        lines.append(f"  Modelo      {short_model_name(llm_client.model)}")
+        lines.append(f"  Model       {short_model_name(llm_client.model)}")
 
     lines.append("")
     lines.append(
         f"  {unit.capitalize():11} {total} total · {ok} OK ({rate:.0f}%) · "
-        f"{failed} falhas"
+        f"{failed} failures"
     )
     if skipped:
-        lines.append(f"  Retomadas   {skipped} já processadas (puladas)")
+        lines.append(f"  Resumed     {skipped} already processed (skipped)")
 
     if llm_client is not None:
         usage = llm_client.usage
@@ -145,12 +145,12 @@ def campaign_summary(
         tok_cache = _counter(usage, "cache_read_tokens")
 
         lines.append("")
-        attempts = [f"chamadas {calls}"]
+        attempts = [f"calls {calls}"]
         if corrections:
-            attempts.append(f"correções {corrections}")
+            attempts.append(f"corrections {corrections}")
         if fallbacks:
             attempts.append(f"fallbacks {fallbacks}")
-        lines.append(f"  Tentativas  {' · '.join(attempts)}")
+        lines.append(f"  Attempts    {' · '.join(attempts)}")
 
         tokens = [f"in {_thousands(tok_in)}", f"out {_thousands(tok_out)}"]
         if tok_cache:
@@ -159,22 +159,22 @@ def campaign_summary(
 
         pace = []
         if total and elapsed > 0:
-            pace.append(f"{elapsed / total:.1f}s por {unit[:3]}")
+            pace.append(f"{elapsed / total:.1f}s per {unit[:3]}")
         if elapsed > 0 and tok_out:
             # Vazão agregada do lote, não velocidade do modelo: com
             # concorrência > 1 há gerações simultâneas, e o valor fica acima do
             # que uma única chamada atinge. Serve para comparar campanhas
             # inteiras (local vs. API), não para aferir o modelo.
-            pace.append(f"{tok_out / elapsed:.0f} tok/s no lote")
+            pace.append(f"{tok_out / elapsed:.0f} tok/s in batch")
         if pace:
-            lines.append(f"  Ritmo       {' · '.join(pace)}")
+            lines.append(f"  Pace        {' · '.join(pace)}")
 
     for label, value in extra or []:
         lines.append(f"  {label:11} {value}")
 
     lines.append("")
-    lines.append(f"  Tempo       {format_duration(elapsed)}")
-    lines.append(f"  Saída       {output}")
+    lines.append(f"  Time        {format_duration(elapsed)}")
+    lines.append(f"  Output      {output}")
     lines.append(sep)
     return "\n".join(lines)
 
@@ -211,33 +211,33 @@ def build_engine_banner(
 
     modelo = [facts.display_name]
     if facts.parameters:
-        modelo.append(f"{facts.parameters} parâmetros")
+        modelo.append(f"{facts.parameters} parameters")
     # IDs de GGUF costumam já terminar na quantização ("...-IQ3_S"): repeti-la
     # como segmento próprio seria redundante.
     if facts.quantization and facts.quantization not in facts.display_name:
         modelo.append(facts.quantization)
     if not facts.parameters and facts.context_window:
-        modelo.append(f"janela {_thousands(facts.context_window)}")
-    lines.append(f"  Modelo      {' · '.join(modelo)}")
+        modelo.append(f"window {_thousands(facts.context_window)}")
+    lines.append(f"  Model       {' · '.join(modelo)}")
 
     if facts.host:
-        servidor = [f"{facts.source or 'servidor'} ({facts.host})"]
+        servidor = [f"{facts.source or 'server'} ({facts.host})"]
         if facts.context_served and facts.context_window:
             servidor.append(
-                f"contexto {_thousands(facts.context_served)} "
-                f"de {_thousands(facts.context_window)}"
+                f"context {_thousands(facts.context_served)} "
+                f"of {_thousands(facts.context_window)}"
             )
         elif facts.context_window:
-            servidor.append(f"janela do modelo {_thousands(facts.context_window)}")
-        lines.append(f"  Servidor    {' · '.join(servidor)}")
+            servidor.append(f"model window {_thousands(facts.context_window)}")
+        lines.append(f"  Server      {' · '.join(servidor)}")
 
     execucao = []
     if concurrent is not None:
-        execucao.append(f"concorrência {concurrent}")
-    execucao.append("extração JSON" if json_path else "extração texto-livre")
+        execucao.append(f"concurrency {concurrent}")
+    execucao.append("JSON extraction" if json_path else "free-text extraction")
     if thinking_off:
-        execucao.append(thinking_off if isinstance(thinking_off, str) else "raciocínio desativado")
-    lines.append(f"  Execução    {' · '.join(execucao)}")
+        execucao.append(thinking_off if isinstance(thinking_off, str) else "reasoning off")
+    lines.append(f"  Run         {' · '.join(execucao)}")
 
     return "\n".join(lines)
 
@@ -256,19 +256,19 @@ def engine_warnings(facts, *, concurrent: Optional[int] = None) -> list[str]:
 
     if facts.context_at_vendor_default:
         warnings.append(
-            f"O servidor está servindo {_thousands(facts.context_served)} tokens "
-            f"de contexto — o default de fábrica, provavelmente não configurado. "
-            f"Os prompts deste coder passam de 7.000 tokens só de template, "
-            f"então as chamadas tendem a falhar. Defina OLLAMA_CONTEXT_LENGTH "
-            f"no servidor com o maior valor que a VRAM comportar (o KV cache "
-            f"cresce com o contexto e disputa memória com os pesos do modelo)."
+            f"The server is serving {_thousands(facts.context_served)} tokens "
+            f"of context — the factory default, probably not configured. "
+            f"This coder's prompts exceed 7,000 tokens of template alone, "
+            f"so calls tend to fail. Set OLLAMA_CONTEXT_LENGTH "
+            f"on the server to the largest value the VRAM allows (the KV cache "
+            f"grows with the context and competes for memory with the model weights)."
         )
 
     if facts.is_local and concurrent is not None and concurrent > 1:
         warnings.append(
-            f"Concorrência {concurrent} contra um servidor local: as chamadas "
-            f"disputam a mesma GPU em vez de rodarem em paralelo, e o contexto "
-            f"pode ser fracionado entre elas. Use --concurrent 1."
+            f"Concurrency {concurrent} against a local server: the calls "
+            f"compete for the same GPU instead of running in parallel, and the context "
+            f"may be split among them. Use --concurrent 1."
         )
 
     return warnings
@@ -295,9 +295,9 @@ def warn_prompt_too_large(facts, estimated_tokens: int, *, margin: float = 0.9) 
         return False
 
     logger.warning(
-        "O prompt estimado (%s tokens) ocupa quase toda a janela disponível "
-        "(%s). A resposta também precisa de espaço — a chamada tende a "
-        "truncar. Reduza o volume enviado ou aumente a janela do servidor.",
+        "The estimated prompt (%s tokens) takes almost the whole available window "
+        "(%s). The response also needs room — the call tends to "
+        "truncate. Reduce what is sent or enlarge the server window.",
         _thousands(estimated_tokens), _thousands(limit),
     )
     return True
@@ -324,7 +324,7 @@ def build_banner_line(llm_client, format: str = "plain") -> str:
     if not json_path and llm_client.backend == "anthropic":
         # Anthropic em texto-livre só ocorre com SDK < 0.77 (sem structured
         # outputs). A correção é atualizar o SDK, não trocar de backend.
-        line += " (atualize 'anthropic>=0.77.1' para o caminho JSON)"
+        line += " (upgrade 'anthropic>=0.77.1' for the JSON path)"
 
     return line
 
@@ -351,11 +351,11 @@ def warn_schema_fallbacks(llm_client) -> None:
     if not n:
         return
     logger.warning(
-        "%d registro(s) gerado(s) em TEXTO LIVRE — o caminho JSON foi "
-        "abandonado e as garantias do schema (enum, minimum/maximum, "
-        "additionalProperties) NÃO se aplicaram a eles. Verifique esses "
-        "registros manualmente; aumentar SYNESIS_CODER_MAX_TOKENS costuma "
-        "eliminar a causa.",
+        "%d record(s) generated as FREE TEXT — the JSON path was "
+        "abandoned and the schema guarantees (enum, minimum/maximum, "
+        "additionalProperties) did NOT apply to them. Check these "
+        "records by hand; raising SYNESIS_CODER_MAX_TOKENS usually "
+        "removes the cause.",
         n,
     )
 
@@ -387,7 +387,7 @@ def runtime_banner(
         # Cinto e suspensório: fetch_model_facts já degrada por dentro, mas o
         # banner não pode depender disso. Relatar a execução jamais pode
         # impedi-la.
-        logger.debug("Metadados do motor indisponíveis: %s", exc)
+        logger.debug("Engine metadata unavailable: %s", exc)
         facts = _mf.ModelFacts(
             display_name=_mf.short_name(getattr(llm_client, "model", "") or "")
         )
@@ -407,7 +407,7 @@ def runtime_banner(
 
     if not json_path and llm_client.backend == "anthropic":
         logger.info(
-            "Atualize 'anthropic>=0.77.1' para habilitar o caminho JSON."
+            "Upgrade 'anthropic>=0.77.1' to enable the JSON path."
         )
 
     for warning in engine_warnings(facts, concurrent=concurrent):
@@ -439,12 +439,12 @@ def _thinking_disabled(llm_client) -> str:
             text = ""
         return text if isinstance(text, str) else ""
     if backend != "openai":
-        return "raciocínio desativado" if _thinking_off_params(model) else ""
+        return "reasoning off" if _thinking_off_params(model) else ""
     params = _reasoning_off_params(model, getattr(llm_client, "_api_url", "") or "")
     effort = (params.get("reasoning") or {}).get("effort") or params.get("reasoning_effort")
     if effort and effort != "none":
-        return f"raciocínio mínimo ({effort})"
-    return "raciocínio desativado" if params else ""
+        return f"minimal reasoning ({effort})"
+    return "reasoning off" if params else ""
 
 
 def print_product_header(quiet: int = 0) -> None:

@@ -253,9 +253,9 @@ class TestThinkingOffParams:
             esperado = bool(_reasoning_off_params(model, "http://localhost:11434"))
             assert bool(_thinking_disabled(_C(model))) is esperado, model
         assert (_thinking_disabled(_C("qwen/qwen3.8-27b", "https://openrouter.ai/api"))
-                == "raciocínio desativado")
+                == "reasoning off")
         assert (_thinking_disabled(_C("openai/gpt-oss-120b", "https://openrouter.ai/api"))
-                == "raciocínio mínimo (low)")
+                == "minimal reasoning (low)")
 
 
 class TestReasoningOffParams:

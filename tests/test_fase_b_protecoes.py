@@ -149,8 +149,8 @@ def test_checagem_previa_aborta_com_chaves_fora_do_projeto(tmp_path):
         assert_input_keys_in_project(ctx, ["alpha2020", "kely2024", "kely2023"], "kely.bib")
 
     msg = str(exc.value)
-    assert "2 de 3" in msg and "kely2024" in msg and "kely.bib" in msg
-    assert "Nenhuma chamada ao modelo" in msg
+    assert "2 of 3" in msg and "kely2024" in msg and "kely.bib" in msg
+    assert "No model call" in msg
 
 
 def test_checagem_previa_passa_e_ignora_caixa(tmp_path):
@@ -239,7 +239,7 @@ def test_e001_nao_vai_ao_modelo_no_laco_async(tmp_path):
 
     assert not ok
     assert not client.fix_async.called
-    assert "não corrigível pelo modelo" in final
+    assert "not fixable by the model" in final
 
 
 def test_avisos_nao_vao_ao_modelo(tmp_path):
@@ -256,8 +256,8 @@ def test_avisos_nao_vao_ao_modelo(tmp_path):
     validator.validate_and_fix(ruim, ctx, client, scope="abstract", max_tries=1)
 
     enviado = client.fix.call_args.args[1]
-    assert "=== ERROS ===" in enviado
-    assert "AVISOS" not in enviado
+    assert "=== ERRORS ===" in enviado
+    assert "WARNINGS" not in enviado
     assert "conceito_novo" not in enviado
 
 

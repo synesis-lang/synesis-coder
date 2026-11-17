@@ -85,7 +85,7 @@ def _resolve_project_context(
             try:
                 return load_project(synp_files[0])
             except Exception as exc:
-                _log.warning("Falha ao carregar projeto %s: %s", synp_files[0], exc)
+                _log.warning("Failed to load project %s: %s", synp_files[0], exc)
                 return None
         parent = search_dir.parent
         if parent == search_dir:
@@ -93,7 +93,7 @@ def _resolve_project_context(
         search_dir = parent
 
     _log.warning(
-        "Projeto .synp não encontrado próximo a %s — incorporação sem validação por campo",
+        ".synp project not found near %s — incorporating without per-field validation",
         synr_path,
     )
     return None
@@ -167,8 +167,8 @@ def _replace_field_value(
     ]
     if not available:
         _log.warning(
-            "Campo '%s': todas as ocorrências já foram consumidas por correções "
-            "anteriores — sugestão rejeitada (mais correções que ocorrências)",
+            "Field '%s': all occurrences were already consumed by previous "
+            "corrections — suggestion rejected (more corrections than occurrences)",
             field_name,
         )
         return None
@@ -189,8 +189,8 @@ def _replace_field_value(
             target_idx = matches[0]
         elif not matches:
             _log.warning(
-                "Campo '%s' com %d ocorrências: nenhuma casa o nó-fonte de '%s' "
-                "— sugestão rejeitada (alvo não identificável)",
+                "Field '%s' with %d occurrences: none matches the source node of '%s' "
+                "— suggestion rejected (target cannot be identified)",
                 field_name,
                 len(candidate_indices),
                 new_value,
@@ -202,9 +202,9 @@ def _replace_field_value(
             # escolher a primeira destruiria uma chain que a correção não
             # endereçava (estudo §5, souza2022c). Rejeitar é a única ação segura.
             _log.warning(
-                "Campo '%s': %d ocorrências compartilham o nó-fonte %r — a correção "
-                "%r não identifica qual substituir; sugestão rejeitada. O formato de "
-                "correção precisa nomear a ocorrência original.",
+                "Field '%s': %d occurrences share the source node %r — the correction "
+                "%r does not identify which one to replace; suggestion rejected. The correction "
+                "format needs to name the original occurrence.",
                 field_name,
                 len(matches),
                 new_root,
@@ -275,7 +275,7 @@ def _validate_item_block(item_block: str, ctx: dict) -> bool:
         )
         return not _has_structural_errors(result)
     except Exception as exc:
-        _log.debug("synesis.load() levantou exceção durante validação: %s", exc)
+        _log.debug("synesis.load() raised an exception during validation: %s", exc)
         return False
 
 
@@ -321,7 +321,7 @@ def _apply_revision_tags(
         seen = seen_by_field.setdefault(base_key, set())
         if normalized in seen:
             _log.warning(
-                "Campo '%s': correção duplicada (byte-idêntica) descartada — %r",
+                "Field '%s': duplicate (byte-identical) correction discarded — %r",
                 base_key,
                 normalized,
             )
@@ -332,7 +332,7 @@ def _apply_revision_tags(
         # como "ignorada" (não conta como rejeição) — contrato pré-Fase 1.
         if not _field_occurs(modified, base_key):
             _log.debug(
-                "Campo '%s' não encontrado no bloco ITEM — sugestão ignorada", base_key
+                "Field '%s' not found in the ITEM block — suggestion ignored", base_key
             )
             continue
 
@@ -360,10 +360,10 @@ def _apply_revision_tags(
             # Confirma o consumo apenas quando a correção é de fato aplicada.
             consumed.clear()
             consumed.update(trial)
-            _log.debug("Campo '%s' atualizado para: %s", base_key, new_value)
+            _log.debug("Field '%s' updated to: %s", base_key, new_value)
         else:
             _log.warning(
-                "Substituição de '%s' rejeitada — '%s' falhou validação Synesis",
+                "Replacement of '%s' rejected — '%s' failed Synesis validation",
                 base_key,
                 new_value,
             )
@@ -522,46 +522,46 @@ def _build_metrics_header(
 
     # --- Fase 4: Incorporate --------------------------------------------------
     lines += [
-        "# --- Fase 4: Incorporate (determinístico, sem LLM) ---",
+        "# --- Stage 4: Incorporate (deterministic, no LLM) ---",
         f"# $metrics.source: {synr_path.name}",
         f"# $metrics.timestamp: {now}",
         f"# $metrics.total_items: {metrics['total_items']}",
-        "# $metrics.total_items.formula: total de blocos ITEM encontrados no .synr de entrada",
+        "# $metrics.total_items.formula: total ITEM blocks found in the input .synr",
         f"# $metrics.items_with_revision: {metrics['items_with_revision']}",
-        "# $metrics.items_with_revision.formula: ITEMs com pelo menos uma tag de revisao ($campo:) no bloco de revisao",
+        "# $metrics.items_with_revision.formula: ITEMs with at least one revision tag ($field:) in the revision block",
         f"# $metrics.items_revised: {metrics['items_revised']}",
-        "# $metrics.items_revised.formula: ITEMs onde >= 1 substituicao de campo foi aceita",
+        "# $metrics.items_revised.formula: ITEMs where >= 1 field replacement was accepted",
         f"# $metrics.fields_changed: {metrics['fields_changed']}",
         "# $metrics.fields_changed.formula: substituicoes aceitas apos validacao por synesis.load()",
         f"# $metrics.fields_rejected: {metrics['fields_rejected']}",
-        "# $metrics.fields_rejected.formula: substituicoes rejeitadas (synesis.load() retornou erros estruturais)",
+        "# $metrics.fields_rejected.formula: rejected replacements (synesis.load() returned structural errors)",
         f"# $metrics.acs: {acs:.3f}",
         "# $metrics.acs.formula: fields_changed / (fields_changed + fields_rejected)",
-        "# $metrics.acs.description: proporcao de sugestoes aceitas; 1.0 = todas aceitas; 0.0 = todas rejeitadas",
+        "# $metrics.acs.description: share of accepted suggestions; 1.0 = all accepted; 0.0 = all rejected",
     ]
 
     # --- Fase anterior (critique ou normalize), se disponível no .synr --------
     prior_phase = synr_header.get("phase")
     # "review" é o nome do formato 2; "critique" o do formato 1.
     if prior_phase in ("review", "critique", "normalize"):
-        lines.append(f"# --- Fase anterior: {prior_phase} ---")
-        _copy_header_metric(lines, synr_header, "model", f"modelo LLM usado na fase {prior_phase}")
-        _copy_header_metric(lines, synr_header, "timestamp", "data/hora de execucao da fase")
+        lines.append(f"# --- Previous stage: {prior_phase} ---")
+        _copy_header_metric(lines, synr_header, "model", f"LLM model used in the {prior_phase} stage")
+        _copy_header_metric(lines, synr_header, "timestamp", "date/time of the stage run")
 
         if prior_phase in ("review", "critique"):
             # Cada par (formato 2, formato 1): o que existir é copiado.
             _copy_header_metric(lines, synr_header, "sensitivity",
-                "sensibilidade da revisao (lenient/standard/strict)")
+                "review sensitivity (lenient/standard/strict)")
             _copy_header_metric(lines, synr_header, "threshold",
-                "limiar de divergencia acima do qual o ITEM recebeu # REVISION")
+                "divergence threshold above which the ITEM received # REVISION")
             _copy_header_metric(lines, synr_header, "metrics.items_total",
-                "total de blocos ITEM avaliados pelo revisor")
+                "total ITEM blocks evaluated by the reviewer")
             _copy_header_metric(lines, synr_header, "metrics.items_to_review",
-                "ITEMs com divergencia acima da sensibilidade")
+                "ITEMs with divergence above the sensitivity")
             _copy_header_metric(lines, synr_header, "metrics.items_flagged",
-                "ITEMs com suspicion_score >= threshold (formato 1)")
+                "ITEMs with suspicion_score >= threshold (format 1)")
             _copy_header_metric(lines, synr_header, "metrics.agreement",
-                "proporcao de ITEMs sem divergencia; abaixo de 0.70 sugere revisor descalibrado")
+                "share of ITEMs without divergence; below 0.70 suggests a miscalibrated reviewer")
             _copy_header_metric_with_formula(
                 lines, synr_header,
                 "metrics.suspicion_rate",
@@ -571,20 +571,20 @@ def _build_metrics_header(
 
         elif prior_phase == "normalize":
             _copy_header_metric(lines, synr_header, "confidence_threshold",
-                "confianca minima exigida para aceitar sugestao do LLM normalizador")
+                "minimum confidence required to accept a suggestion from the normalizer LLM")
             _copy_header_metric(lines, synr_header, "metrics.corpus_files",
-                "numero de arquivos .synr processados em conjunto")
+                "number of .synr files processed together")
             _copy_header_metric(lines, synr_header, "metrics.corpus_items_total",
-                "total de blocos ITEM em todos os arquivos do corpus")
+                "total ITEM blocks across all corpus files")
             _copy_header_metric(lines, synr_header, "metrics.codes_unique",
-                "codigos distintos encontrados no corpus (apos agrupamento por chave normalizada)")
+                "distinct codes found in the corpus (after grouping by normalized key)")
             _copy_header_metric(lines, synr_header, "metrics.residual_groups",
-                "grupos com > 1 variante apos normalizacao deterministica (enviados ao LLM)")
+                "groups with > 1 variant after deterministic normalization (sent to the LLM)")
             _copy_header_metric(lines, synr_header, "metrics.llm_canonicals",
-                "grupos onde o LLM sugeriu e a sugestao foi aceita acima de confidence_threshold")
+                "groups where the LLM suggested and the suggestion was accepted above confidence_threshold")
             _copy_header_metric(lines, synr_header, "metrics.llm_canonicals.description", None)
             _copy_header_metric(lines, synr_header, "metrics.corpus_items_revised",
-                "ITEMs do corpus com pelo menos um codigo substituido pela forma canonica")
+                "corpus ITEMs with at least one code replaced by the canonical form")
             _copy_header_metric_with_formula(
                 lines, synr_header,
                 "metrics.normalization_rate",
@@ -673,7 +673,7 @@ def process_incorporate(
     """
     synr_path = Path(synr_path).resolve()
     if not synr_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {synr_path}")
+        raise FileNotFoundError(f"File not found: {synr_path}")
 
     # 1. Parsear o .synr
     doc = parse_synr(synr_path)
@@ -701,7 +701,7 @@ def process_incorporate(
     output_path = Path(output_path).resolve()
     safe_write_output(output_path, final_content, overwrite=overwrite, backup=backup)
 
-    _log.info("Incorporate concluído: %s", output_path)
+    _log.info("Incorporate finished: %s", output_path)
 
     # 7. Montar resumo
     total = metrics["total_items"]
@@ -712,21 +712,21 @@ def process_incorporate(
     acs = (changed / total_fields) if total_fields > 0 else 1.0
 
     summary = (
-        f"Incorporate concluído\n"
-        f"  Origem:  {synr_path.name}\n"
-        f"  Saída:   {output_path}\n"
-        f"  ITEMs:   {total} total | {metrics['items_with_revision']} com revisão | "
-        f"{revised} modificados\n"
-        f"  Campos:  {changed} aceitos | {rejected} rejeitados | ACS {acs:.3f}\n"
-        f"  Validação: {'com projeto' if ctx else 'sem projeto (sem validação)'}"
+        f"Incorporate finished\n"
+        f"  Input:   {synr_path.name}\n"
+        f"  Output:  {output_path}\n"
+        f"  ITEMs:   {total} total | {metrics['items_with_revision']} with review | "
+        f"{revised} modified\n"
+        f"  Fields:  {changed} accepted | {rejected} rejected | ACS {acs:.3f}\n"
+        f"  Validation: {'with project' if ctx else 'without project (no validation)'}"
     )
 
     if format == "verbose":
         header = (
             f"# synesis-coder incorporate\n"
-            f"# fonte: {synr_path.name}\n"
-            f"# saída: {output_path.name}\n"
-            f"# ITEMs: {total} | revisados: {revised} | ACS: {acs:.3f}\n"
+            f"# input: {synr_path.name}\n"
+            f"# output: {output_path.name}\n"
+            f"# ITEMs: {total} | revised: {revised} | ACS: {acs:.3f}\n"
         )
         return header + "\n" + summary
 

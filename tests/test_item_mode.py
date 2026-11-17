@@ -195,7 +195,7 @@ class TestAssertBibrefKnown:
         with pytest.raises(ValueError) as exc_info:
             assert_bibref_known(ctx, "smith2024")
 
-        assert "bibliografia" in str(exc_info.value).lower()
+        assert "bibliography" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------

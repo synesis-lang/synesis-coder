@@ -96,8 +96,8 @@ def test_counts_failures_with_correct_plural(caplog):
     with caplog.at_level(logging.INFO, logger=progress_mod.__name__):
         p.mark(success=False)
         p.mark(success=False)
-    assert "1 falha " in caplog.records[0].message + " "
-    assert "2 falhas" in caplog.records[1].message
+    assert "1 failure " in caplog.records[0].message + " "
+    assert "2 failures" in caplog.records[1].message
 
 
 def test_no_failure_segment_when_all_succeed(caplog):
@@ -105,7 +105,7 @@ def test_no_failure_segment_when_all_succeed(caplog):
     with caplog.at_level(logging.INFO, logger=progress_mod.__name__):
         p.mark()
         p.mark()
-    assert all("falha" not in r.message for r in caplog.records)
+    assert all("failure" not in r.message for r in caplog.records)
 
 
 def test_detail_is_appended(caplog):
@@ -172,7 +172,7 @@ def test_shows_corrections_and_fallbacks_during_campaign(caplog):
 
     assert "fallback" not in caplog.records[0].message
     assert "1 fallback" in caplog.records[1].message
-    assert "1 correção" in caplog.records[1].message
+    assert "1 correction" in caplog.records[1].message
 
 
 def test_clean_campaign_shows_no_signal_noise(caplog):
@@ -187,9 +187,9 @@ def test_clean_campaign_shows_no_signal_noise(caplog):
         p.mark()
 
     for rec in caplog.records:
-        assert "correç" not in rec.message
+        assert "correction" not in rec.message
         assert "fallback" not in rec.message
-        assert "falha" not in rec.message
+        assert "failure" not in rec.message
 
 
 def test_signal_plurals_agree_with_count(caplog):
@@ -204,10 +204,10 @@ def test_signal_plurals_agree_with_count(caplog):
         p.mark(success=False)                      # 2 falhas, 2 correções
         p.mark()
 
-    assert "1 falha ·" in caplog.records[0].message
-    assert "1 correção" in caplog.records[0].message
-    assert "2 falhas" in caplog.records[1].message
-    assert "2 correções" in caplog.records[1].message
+    assert "1 failure ·" in caplog.records[0].message
+    assert "1 correction" in caplog.records[0].message
+    assert "2 failures" in caplog.records[1].message
+    assert "2 corrections" in caplog.records[1].message
 
 
 def test_progress_survives_mock_usage(caplog):

@@ -163,4 +163,4 @@ class TestDatasetCobertura:
 
     def test_nao_recarrega_sem_vocabulario_aberto(self):
         chamadas, msg = self._rodar({"emocao": FIELDS["emocao"]})
-        assert chamadas == [False] and "Nenhum registro" in msg
+        assert chamadas == [False] and "No record" in msg

@@ -311,7 +311,7 @@ class TestSplitEvery:
         assert am.resolve_output_mode(False, 100) == "split"
 
     def test_split_and_per_reference_are_exclusive(self):
-        with pytest.raises(ValueError, match="mutuamente exclusivos"):
+        with pytest.raises(ValueError, match="mutually exclusive"):
             am.resolve_output_mode(True, 100)
 
     def test_split_every_must_be_positive(self):
@@ -431,11 +431,11 @@ class TestCooldown:
         assert am.resolve_cooldown_setting(raw) == expected
 
     def test_resolve_setting_rejects_garbage(self):
-        with pytest.raises(ValueError, match="Valor inválido"):
+        with pytest.raises(ValueError, match="Invalid value"):
             am.resolve_cooldown_setting("devagar")
 
     def test_resolve_setting_rejects_negative(self):
-        with pytest.raises(ValueError, match="negativo"):
+        with pytest.raises(ValueError, match="cannot be negative"):
             am.resolve_cooldown_setting(-1)
 
 
@@ -462,7 +462,7 @@ class TestPlaceholderValue:
         assert _placeholder_value(self._Spec("DATE")) == "1900-01-01"
 
     def test_text_uses_textual_sentinel(self):
-        assert "falha" in _placeholder_value(self._Spec("TEXT"))
+        assert "failure" in _placeholder_value(self._Spec("TEXT"))
 
     def test_enumerated_without_values_falls_back(self):
-        assert "falha" in _placeholder_value(self._Spec("ENUMERATED", None))
+        assert "failure" in _placeholder_value(self._Spec("ENUMERATED", None))

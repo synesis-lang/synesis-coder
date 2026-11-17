@@ -1115,10 +1115,27 @@ def _build_ontology_fields_section(ctx: dict, json_path: bool = False) -> str:
         instruction = _field_instruction(
             name, spec, ctx.get("chain_relations", {}), json_path=json_path
         )
-        lines.append(f"\n  {name} ({spec.type.name}) [{req_label}]:")
+        # O papel (ROLE) entra na linha do campo: `definicao (TEXT, NOTE DEFINITION)`.
+        role = getattr(spec, "role", None)
+        kind = f"{spec.type.name}, {role}" if role else spec.type.name
+        lines.append(f"\n  {name} ({kind}) [{req_label}]:")
+        # Sem DESCRIPTION nem GUIDELINES, a instrução vem do papel.
+        has_own = getattr(spec, "description", None) or getattr(spec, "guidelines", None)
+        if role in _ROLE_INSTRUCTIONS and not has_own:
+            instruction = _ROLE_INSTRUCTIONS[role]
         lines.append(f"    {instruction}")
 
     return "\n".join(lines)
+
+
+# Instrução padrão por papel, quando o campo não traz DESCRIPTION nem GUIDELINES
+# (Spec ROLE/EXPORT §11, item 2).
+_ROLE_INSTRUCTIONS = {
+    "NOTE DEFINITION": "Define the concept by how it is used in the corpus excerpts provided.",
+    "NOTE USAGE": "Say when to apply this code and when to prefer another one.",
+    "NOTE EXAMPLE": "Give one typical case of this concept, taken from the evidence.",
+    "NOTE COUNTEREXAMPLE": "Give a similar case to which this code does NOT apply.",
+}
 
 
 def _build_ontology_output_format_section(ctx: dict) -> str:
@@ -1159,7 +1176,13 @@ def _build_ontology_user_message(
     relations = semantic_ctx.get("relations", [])
     if relations:
         rel_lines = [f"  {a} -> {r} -> {b}" for a, r, b in relations[:15]]
-        parts.append("OBSERVED RELATIONS:\n" + "\n".join(rel_lines))
+        # Rótulo de evidência (Spec A0, item 6): o que as FONTES afirmam, não
+        # valor de campo. Uma hierarquia adotada pelo projeto mora em campos
+        # próprios do .syno, nunca é copiada daqui.
+        parts.append(
+            "RELATIONS STATED BY SOURCES (evidence of use; do not copy them as field values):\n"
+            + "\n".join(rel_lines)
+        )
 
     # Co-ocorrências
     co_codes = semantic_ctx.get("co_codes", [])

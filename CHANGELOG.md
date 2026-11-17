@@ -7,7 +7,213 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [0.15.0] — 2026-11-17
+
+### Changed — saídas em inglês (idioma oficial dos CLIs, 2026-11-17)
+
+- Mensagens, relatórios, avisos, sumário de campanha, banner do motor,
+  relatório de depuração e erros do coder passam a sair em inglês. Prompts
+  enviados ao modelo não mudam (o do modo `document` segue em português).
+- Valores gravados também passam a inglês, para que manifestos e CSVs sejam
+  legíveis por quem lê a saída: estados (`applying`, `interrupted`,
+  `conflict`, `no_change`, `obsolete`), tipos de fase (`descriptive`,
+  `taxonomy`, `synonyms`), chaves de `notes` (`precheck`, `parent_creation`,
+  `grouping`, `top`, `groups`, `duplicates`, `terms_without_concept`),
+  propostas de pai novo (`new:<nome>`), colunas do CSV de `review`
+  (`stratum`, `inclusion_prob`, `weight`, `items_reached`, `unit`,
+  `judgement`, `direction_ok`, `species_ok`, `note`…), arquivo
+  `.review_<unidade>.csv` e manifesto `.consolidation.manifest.json`.
+  Manifestos gravados pelas versões de teste anteriores continuam legíveis
+  (mapeamento na leitura; o manifesto antigo de consolidação é renomeado).
+- Separador de milhar em inglês (`16,384`) no banner e no sumário.
+
+### Fixed — integridade (avaliação de 2026-11-17, R1–R4 e R6)
+
+- **Barreira de escrita** (`validate_changes`, usada por `ontology`, `phase`
+  e `consolidate`): compara os erros do projeto inteiro por identidade estável
+  (código e mensagem sem posições), não a contagem por bloco do destino. Uma
+  fase não aplica mais ligações que fecham um ciclo com aresta preexistente,
+  nem troca um erro por outro no mesmo bloco. Erro sem dono claro aciona
+  aceitação incremental; se ainda sobrar erro novo, nada é aplicado.
+- **`consolidate`** recusa antes de gravar quando há aliases do preterido em
+  outro `.syno` (viravam E146), e valida o conjunto de forma atômica.
+- **Entrada alterada durante a execução** (template, anotações, outro
+  `.syno`): a fase e o modo `ontology` abortam sem gravar, com o arquivo
+  nomeado e o manifesto em `conflict`. Antes "revalidavam" com o contexto
+  antigo.
+- **Taxonomia:** um pai novo pode receber pai na segunda passada (e servir de
+  filho a outro pai novo com `--new-generations 2`); pais novos acionam a
+  segunda passada; ligações do modelo descartadas antes da validação vão para
+  `notes.discarded` e para o relatório.
+- **`review --score`:** não publica IC de largura zero por falta de
+  informação. Censo sem erro amostral; estrato com menos de 2 julgados → IC
+  não publicado; proporção extrema com Agresti–Coull; estratos sem julgamento
+  e não resposta declarados.
+
+### Fixed
+
+- **O `.env` da pasta do projeto passa a ser lido** (`find_dotenv(usecwd=True)`),
+  antes do `.env` do coder: precedência variável de ambiente > `.env` do projeto
+  > `.env` do coder. Antes o python-dotenv subia a partir do pacote, e o `.env`
+  do pesquisador nunca era lido. É ali que cada projeto declara
+  `SYNESIS_CODER_LANGUAGE` (Social Acceptance `en`, face85 `pt-BR`).
+- O prompt do bloco SOURCE em texto livre (modo `document`) segue o idioma do
+  projeto: português com `pt-*`, inglês nos demais casos.
+- Dependência `synesis>=0.15.0` (era `>=0.13.3`): `phase`, `review` e
+  `consolidate` importam `synesis.semantic.project_blocks`, que só existe no
+  synesis 0.15. No release, vira `synesis>=0.15.0`.
+- `review` aceitava na CLI as unidades e estratos em inglês, mas o módulo
+  comparava com os nomes em português: a amostra saía vazia. Agora os dois
+  usam os mesmos nomes.
+
+### Changed — ajuda com o vocabulário do modelo de conhecimento
+
+- Grupo "Building the ontology" passa a "Building the knowledge model";
+  `ontology` "Generates model entries (.syno)…"; `phase` "Runs a PHASE: fills
+  one declared group of template fields (ontology phases…)"; `consolidate`
+  "Merges a duplicate model entry into the one that remains (ROLE USE)";
+  `suggest` "Suggests codes already used in the project" (é o que ele faz:
+  sugere entre os códigos das anotações). As primeiras linhas de `--help`
+  desses comandos seguem o mesmo texto. Nomes de comando inalterados.
+
+### Added — `synesis-coder consolidate` (etapa U)
+
+- `consolidate <projeto.synp> <preterido> --into <alvo>`: leva ao alvo os
+  rótulos ALTERNATIVE/HIDDEN e os pais do preterido (sem ciclo nem
+  autorreferência), preenche campos vazios do alvo, arquiva no manifesto o
+  que o alvo já tinha e o `LABEL PREFERRED` do preterido, redireciona os
+  aliases do preterido e grava o preterido só com `USE`. Validação do
+  conjunto, conferência das entradas e manifesto
+  (`<destino>.consolidation.manifest.json`). `--dry-run`, `--backup`.
+- `--revert`: restaura o preterido e o alvo; se o alvo foi editado depois,
+  ele fica e o preterido volta sem os campos transferidos.
+- Fases e modo `ontology` ignoram blocos preteridos (não são conceitos).
+
+### Added — fases de taxonomia e de sinônimos; `review` por amostragem (etapas B4, B5)
+
+- **O algoritmo da fase vem dos papéis dos FIELDS**: `HIERARCHY` → taxonomia
+  (mais, no máximo, um TEXT sem papel para a justificativa); `LABEL
+  ALTERNATIVE|HIDDEN` → sinônimos; demais → descritiva. Misturar hierarquia
+  e rótulos numa fase é erro.
+- **Taxonomia** (estudo §6.5): tabela dos conceitos com bloco (definição pelo
+  papel, classificação, pais, rótulos, uso no corpus); trabalho dividido em
+  grupos (`--group-by`, `--group-size`) e segunda passada entre
+  intermediários de grupos diferentes. Reconhece pais existentes pelo teste da
+  espécie (KIND/PART/INSTANCE) e cria pais novos (`--new-generations`, padrão
+  1; 0 desliga) com os campos obrigatórios gerados a partir de trechos dos
+  descendentes (evidência derivada, registrada); sem herança. Checagem
+  prévia dos REQUIRED (produzível, conhecido, bloqueante): `LABEL
+  ALTERNATIVE` obrigatório desliga a criação de pais, e o relatório diz por
+  quê. Pai novo com nome ou rótulo de conceito existente é reaproveitado.
+  Políticas desligadas por padrão: `--within-topic`, `--min-children`,
+  `--max-new`; orçamento `--max-calls`. `--hide-relations` tira relações da
+  CHAIN do prompt (separação do gabarito num piloto avaliado). Validação do
+  conjunto com cascata: pai novo que cai leva as ligações que dependem dele.
+  Relatório com ligações por espécie, pais novos (e os sem questão),
+  conceitos de topo decididos e conceitos sem posição.
+- **Sinônimos** (estudo §6.4): candidatos por semelhança de nome
+  (separadores, caixa, acentos, plurais do português e do inglês); um termo
+  do corpus sem bloco vira rótulo do conceito quando o modelo confirma;
+  conceitos com bloco parecidos vão ao relatório como candidatos a duplicata
+  (sem chamada ao modelo; consolidação na etapa U). Embeddings: ainda não.
+- **`synesis-coder review <projeto> <fase>`**: amostra estratificada
+  (`--unit edge|label|concept`, `--stratify
+  depth|topic|origin|none`) das propostas aplicadas, com probabilidade de
+  inclusão e peso; `--score` estima a precisão (e as de direção e de espécie)
+  com IC 95% e, à parte, a precisão ponderada por ITEMs alcançados. Pais
+  novos sem questão formam estrato próprio.
+- Manifesto ganha `notes` (topo decidido, checagem prévia, hashes por grupo,
+  duplicatas). A moldura comum das fases foi para `phase_run.py`.
+
+### Fixed
+
+- `phase`: `--new-generations 0` era descartado como opção não informada.
+
+### Added — `synesis-coder phase`: fases do `.synp`, manifesto e fase descritiva (etapas B2, B3)
+
+- **`synesis-coder phase <projeto.synp> <fase>`** executa uma `PHASE ONTOLOGY`
+  descritiva; `--list` mostra as fases (campos, destino, conexão, último
+  estado). O plano é lido pelo parser do synesis e validado pelo compilador
+  (E133–E144): um plano com erro não roda. `PHASE ANNOTATIONS` (B6) e fases com
+  campos CODE/CHAIN/LABEL (taxonomia e sinônimos, B4/B5) são recusadas com
+  mensagem.
+- **Conexão por fase**: `SYNESIS_CODER_PHASE_<NOME>_MODEL`, `_BACKEND`,
+  `_API_URL`, `_API_KEY`; sem variáveis, a configuração global. Validada antes
+  da primeira chamada.
+- **Fase descritiva**: só os campos da fase que estão vazios (todos com
+  `--overwrite`); bloco novo recebe os FIELDS e os REQUIRED geráveis; conceito
+  com bloco em outro `.syno` fica pendente (`--output` troca o destino). O
+  contexto de cada conceito é filtrado pelo `INPUT`. Grava pela mesclagem por
+  bloco (A0a), com validação do conjunto e conferência das entradas.
+- **Manifesto** `<destino>.<fase>.manifest.json`: entradas (hashes), hash de
+  antes e de depois, configuração sem segredos, propostas com estado
+  (proposta, aplicada, rejeitada, interrompida, obsoleta, pendente) e motivo de
+  parada. Registro "aplicando" atômico antes da troca; ao iniciar, recuperação
+  pelo hash do destino (aplicada, interrompida e retomada sem nova chamada ao
+  modelo, ou conflito). Execução repetida sem mudança não chama o modelo;
+  mudança de entrada marca a proposta como obsoleta; rejeitadas não se repetem
+  sem entrada nova ou `--retry-rejected`. `--dry-run` mostra o diff sem gravar.
+
+### Fixed — fins de linha na mesclagem do `.syno`
+
+- O modo ontology lia o destino com `read_text` (CRLF virava LF) e gravava em
+  modo texto (LF virava CRLF no Windows). `safe_write_output` ganhou
+  `newline=`; a mesclagem lê e grava com `newline=""`: LF fica LF, CRLF fica
+  CRLF, sem `
+`.
+
+### Added — papéis (ROLE) no modo ontology (etapa A0b) e identidade única
+
+- Campos com papel `LABEL` não são gerados pelo modo descritivo (rótulos são
+  da fase de sinônimos).
+- A linha do campo mostra o papel ao modelo (`definicao (TEXT, NOTE
+  DEFINITION)`); sem DESCRIPTION nem GUIDELINES, a instrução vem do papel.
+- A definição do conceito é o campo `NOTE DEFINITION`; a heurística pela
+  descrição ("defin…") só vale em templates sem esse papel.
+- `synesis_coder.identity.concept_key`: um único ponto de identidade de
+  conceito, delegado ao `normalize_code` do compilador (com NFC). As cópias de
+  `concept_index`, `ontology_mode`, `variant_candidates` e `syno_merge` usam-no.
+- A validação isolada de um bloco ONTOLOGY não trata como erro estrutural um
+  conceito citado sem bloco (`SYNESIS_E101`): os demais blocos não estão
+  carregados ali, e a referência é conferida na validação do conjunto.
+
+### Changed — modo `ontology` mescla por bloco num único `.syno` (etapa A0a)
+
+- **O `.syno` de destino é editado bloco a bloco, não regravado.** Um bloco
+  existente recebe só os campos gerados; os demais campos, a ordem, os
+  comentários e os campos de várias linhas ficam como estavam. Conceitos sem
+  bloco ganham bloco no fim do arquivo. Antes, sem `--update`, o arquivo inteiro
+  era regenerado e blocos escritos à mão para conceitos fora do corpus sumiam.
+- **Campos CODE e CHAIN do ONTOLOGY não são mais gerados** (regra pelo tipo):
+  são estrutura, não descrição. Ficam como estão no bloco.
+- **`--update` completa blocos incompletos.** Um bloco ao qual falta um campo
+  REQUIRED gerável recebe só esse campo; antes, o bloco inteiro era pulado. Por
+  isso `--update` não exige mais que a ontologia antiga compile.
+- **Destino inequívoco.** `--output` aponta o arquivo. Se ele é um `INCLUDE
+  ONTOLOGY` do projeto, precisa ser local: um `.syno` de `INCLUDE SHARED` é
+  recusado antes de qualquer chamada ao modelo. Um conceito cujo bloco está em
+  outro `.syno` do projeto não é duplicado no destino.
+- **Validação do conjunto.** Com as alterações em memória, o projeto inteiro é
+  compilado; só os blocos que introduzem erro novo são rejeitados (vão para o
+  `.rejeitados`), e os erros que já existiam não são atribuídos à aplicação.
+- **Conferência das entradas.** Os arquivos lidos no início são conferidos
+  antes de gravar: se o destino mudou, nada é gravado; se outro arquivo do
+  projeto mudou, o conjunto é revalidado com a versão atual.
+- No prompt, a seção "OBSERVED RELATIONS" passa a "RELATIONS STATED BY SOURCES",
+  com a instrução de não copiá-las como valor de campo.
+
+### Added — questões de competência no contexto do projeto (etapa Q)
+
+- O bloco `QUESTIONS` do `.synp` (synesis >= 0.15) entra no mesmo "PROJECT
+  CONTEXT" do `DESCRIPTION`, em todos os modos. Um projeto sem o bloco, ou um
+  compilador anterior a ele, gera exatamente o prompt de antes.
+
+### Fixed — campo de várias linhas achatado na validação
+
+- A normalização de indentação aplicada a todo texto validado punha todas as
+  linhas de um bloco no mesmo nível, e um campo cujo valor começa na linha
+  seguinte (`exemplos:` e as linhas recuadas abaixo) deixava de compilar. A
+  profundidade relativa ao primeiro campo do bloco agora é preservada.
 
 ---
 

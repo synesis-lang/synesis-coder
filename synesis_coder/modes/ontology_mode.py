@@ -29,6 +29,12 @@ from synesis.ast.nodes import FieldType
 from synesis_coder.block_assembler import assemble_ontology
 from synesis_coder.concept_index import _as_list, concept_occurrences, item_field_value
 from synesis_coder.llm_client import LLMClient
+from synesis_coder.ontology_publish import (
+    DestinationError,
+    InputSnapshot,
+    resolve_destination,
+    validate_changes,
+)
 from synesis_coder.progress import BatchProgress
 from synesis_coder.project_loader import load_project
 from synesis_coder.prompt_builder import (
@@ -41,6 +47,14 @@ from synesis_coder.runtime_info import (
     warn_schema_fallbacks,
 )
 from synesis_coder.schema_builder import build_ontology_schema
+from synesis_coder.syno_merge import (
+    concept_key,
+    entries_by_field,
+    existing_blocks,
+    field_names,
+    merge_block,
+    merge_into_syno,
+)
 from synesis_coder.synr_io import safe_write_output
 from synesis_coder.validator import validate_ontology_entry_async
 
@@ -87,7 +101,7 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
         occ = concept_occurrences(linked, item_fields)
         ctx["_concept_occurrences"] = occ  # índice único por sessão (ctx é compartilhado)
 
-    key = " ".join(str(code).strip().split()).lower()
+    key = concept_key(code)
     ocorrencias = occ.get(key, [])
     frequency = len(ocorrencias)
     sources = len({bibref for bibref, _item, _t in ocorrencias})
@@ -96,7 +110,7 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
     all_triples: List[tuple] = getattr(linked, "all_triples", None) or []
     relations: List[tuple] = [
         (a, r, b) for a, r, b in all_triples
-        if " ".join(str(a).split()).lower() == key or " ".join(str(b).split()).lower() == key
+        if concept_key(a) == key or concept_key(b) == key
     ]
 
     # Co-ocorrências: outros conceitos nos mesmos ITEMs, por frequência
@@ -105,7 +119,7 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
         vistos = set()
         for pares in termos.values():
             for conceito, _texto in pares:
-                ck = " ".join(conceito.split()).lower()
+                ck = concept_key(conceito)
                 if ck == key or ck in vistos:
                     continue
                 vistos.add(ck)
@@ -139,7 +153,7 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
                 ex[name] = " | ".join(vals)[:300]
         for name, pares in termos.items():
             textos = list(dict.fromkeys(
-                t for c, t in pares if " ".join(c.split()).lower() == key))
+                t for c, t in pares if concept_key(c) == key))
             if textos:
                 ex[name] = " ; ".join(textos)[:300]
         if ex:
@@ -152,16 +166,6 @@ def _build_semantic_ctx(code: str, ctx: dict) -> dict:
         "co_codes": co_codes,
         "examples": examples,
     }
-
-
-# Cabeçalho que separa as entradas anexadas por `--update` do conteúdo
-# preexistente, para que a origem de cada bloco continue legível no arquivo.
-_UPDATE_SECTION_HEADER = (
-    "# ---------------------------------------------------------------------------\n"
-    "# Entradas acrescentadas por `synesis-coder ontology --update` ({count} novas).\n"
-    "# O conteúdo acima foi preservado na íntegra.\n"
-    "# ---------------------------------------------------------------------------"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +197,74 @@ def _get_pending_codes(ctx: dict, update: bool) -> List[str]:
     skipped = len(all_codes) - len(pending)
     if skipped > 0:
         logger.info(
-            "--update: %d código(s) já definido(s) no .syno — pulando", skipped
+            "--update: %d code(s) already defined in the .syno — skipping", skipped
         )
 
     return sorted(pending)
+
+
+# Tipos que o modo ontology nao gera: sao estrutura (conceitos citados, cadeias),
+# nao descricao. Ficam como estao no bloco (Spec A0, item 1: regra pelo tipo).
+_STRUCTURAL_TYPES = (FieldType.CODE, FieldType.CHAIN)
+
+
+def _generation_ctx(ctx: dict) -> dict:
+    """Contexto com so os campos ONTOLOGY que o modo gera (sem CODE/CHAIN).
+
+    Schema, prompt e montagem do bloco leem `ontology_fields`; com o filtro, o
+    modelo nunca preenche nem ve como tarefa um campo estrutural.
+    """
+    # Fora: CODE/CHAIN (pelo tipo) e campos com papel LABEL (rótulos são
+    # decisão terminológica, produzida pela fase de sinônimos, não pelo modo
+    # descritivo — Spec A0, item 1).
+    fields = {
+        name: spec for name, spec in ctx.get("ontology_fields", {}).items()
+        if spec.type not in _STRUCTURAL_TYPES
+        and not str(getattr(spec, "role", None) or "").startswith("LABEL")
+    }
+    gen = dict(ctx)
+    gen["ontology_fields"] = fields
+    gen["required_ontology"] = [r for r in ctx.get("required_ontology", []) if r in fields]
+    return gen
+
+
+def _plan_work(
+    codes: List[str],
+    gen_ctx: dict,
+    dest_blocks: dict,
+    elsewhere: Set[str],
+    update: bool,
+) -> Tuple[Dict[str, Optional[Set[str]]], List[str]]:
+    """O que gerar para cada codigo.
+
+    Returns:
+        ({codigo: campos a gravar (None = todos os gerados)}, codigos cujo bloco
+        esta em outro .syno do projeto). Sem --update, todo codigo do corpus tem
+        seus campos gerados reescritos. Com --update, um codigo sem bloco ganha
+        bloco e um bloco ao qual falta campo REQUIRED geravel recebe so esse
+        campo (antes, o bloco inteiro era pulado).
+    """
+    required = set(gen_ctx.get("required_ontology", []))
+    plan: Dict[str, Optional[Set[str]]] = {}
+    other_file: List[str] = []
+    # `field_specs` tem todos os campos (o contexto de geração tira os CODE).
+    use_name = next((n for n, s in (gen_ctx.get("field_specs") or {}).items()
+                     if str(getattr(s, "role", None) or "") == "USE"), None)
+    for code in codes:
+        key = concept_key(code)
+        block = dest_blocks.get(key)
+        if block is not None and use_name and use_name in field_names(block):
+            continue  # preterido (etapa U): o conceito é o alvo
+        if block is None and key in elsewhere:
+            other_file.append(code)
+            continue
+        if not update or block is None:
+            plan[code] = None
+            continue
+        missing = required - set(field_names(block))
+        if missing:
+            plan[code] = missing
+    return plan, other_file
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +317,7 @@ async def _process_one_code(
         (code, syno_output, success)
     """
     async with semaphore:
-        logger.info("Processando código: %s", code)
+        logger.info("Processing code: %s", code)
 
         semantic_ctx = _build_semantic_ctx(code, ctx)
 
@@ -258,22 +326,33 @@ async def _process_one_code(
                 code, ctx, semantic_ctx, llm_client
             )
         except Exception as exc:
-            logger.error("Falha na chamada LLM para '%s': %s", code, exc)
+            logger.error("LLM call failed for '%s': %s", code, exc)
             error_output = (
-                f"# ERRO: chamada LLM falhou para ONTOLOGY {code}\n"
+                f"# ERROR: LLM call failed for ONTOLOGY {code}\n"
                 f"# {exc}\n"
             )
             return code, error_output, False
 
+        # Bloco existente: valida o bloco JA MESCLADO (campos curados + gerados),
+        # para que um campo estrutural obrigatorio que ja existe conte. O que vai
+        # para o arquivo e decidido depois, so pelos campos gerados.
+        existing = ctx.get("_existing_blocks", {}).get(concept_key(code))
+        wanted = ctx.get("_wanted_fields", {}).get(concept_key(code))
+        candidate = raw_syno
+        generated = entries_by_field(raw_syno)
+        if existing is not None and generated:
+            keep = {n: v for n, v in generated.items() if wanted is None or n in wanted}
+            candidate = "".join(merge_block(existing, keep).lines)
+
         ontology_key = f"ontology_{code}.syno"
         final_syno, success = await validate_ontology_entry_async(
-            raw_syno, ctx, llm_client, ontology_key=ontology_key,
+            candidate, ctx, llm_client, ontology_key=ontology_key,
         )
 
         if success:
             logger.info("OK: %s", code)
         else:
-            logger.warning("Validação falhou para '%s'", code)
+            logger.warning("Validation failed for '%s'", code)
 
         return code, final_syno, success
 
@@ -360,66 +439,85 @@ async def _process_ontology_async(
     # reconfigurar aqui para preservar os níveis de -v/-q e o silenciamento de
     # loggers de terceiros.
 
-    # 1. Carregar projeto com anotações; a ontologia existente só é necessária
-    # em `--update`, que a consulta para pular códigos já definidos.
+    # 1. Carregar projeto com anotações, sem compilar a ontologia existente.
     #
-    # Fora de `--update` o .syno é integralmente REGERADO, então exigir que ele
-    # compile seria um impasse: um arquivo escrito sob regras anteriores (ex.:
-    # ORDERED com rótulo, hoje E088) abortaria a carga — impedindo justamente a
-    # regeneração que o corrigiria. Mesmo raciocínio já aplicado ao caminho
-    # `--prompt-only` abaixo.
-    #
-    # Anotações .syn desatualizadas também não impedem a geração: o modo lê
-    # delas apenas os códigos e o contexto semântico.
-    try:
-        ctx = load_project(
-            project_path,
-            load_annotations=True,
-            load_ontology=update,
-            tolerate_annotation_errors=True,
-        )
-    except ValueError as exc:
-        if not update:
-            raise
-        # Em `--update` o .syno existente é PRESERVADO e as novas entradas são
-        # anexadas a ele — por isso precisa compilar. Anexar a um arquivo
-        # inválido só produziria um arquivo inválido maior. A saída sem
-        # `--update` regenera tudo e não tem essa exigência.
-        raise ValueError(
-            f"{exc}\n\n"
-            "A ontologia existente não compila, e `--update` preserva o arquivo "
-            "atual para anexar as novas entradas.\n"
-            "Corrija os erros acima, ou rode SEM `--update` para regenerar "
-            "todas as entradas do zero."
-        ) from exc
+    # O .syno de destino é lido como TEXTO e mesclado por bloco (etapa A0a);
+    # a validação do conjunto, no fim, compara com o estado anterior e só
+    # rejeita o que a aplicação piorou. Exigir que a ontologia antiga compile
+    # seria um impasse: um bloco sem campo REQUIRED — justamente o que
+    # `--update` agora completa — ou escrito sob regras anteriores (ex.: ORDERED
+    # com rótulo, hoje E088) abortaria a carga. Anotações .syn desatualizadas
+    # também não impedem a geração: o modo lê delas os códigos e o contexto.
+    ctx = load_project(
+        project_path,
+        load_annotations=True,
+        load_ontology=False,
+        tolerate_annotation_errors=True,
+    )
 
     # 2. Verificar que o template tem ONTOLOGY scope
     if not ctx["has_ontology_scope"]:
         raise ValueError(
-            f"O template do projeto '{project_path.stem}' não define campos ONTOLOGY. "
-            "O modo 'ontology' requer que o template tenha pelo menos um campo "
-            "com SCOPE ONTOLOGY."
+            f"The template of project '{project_path.stem}' defines no ONTOLOGY fields. "
+            "The 'ontology' mode requires the template to have at least one field "
+            "with SCOPE ONTOLOGY."
         )
 
     # 3. Verificar que há códigos anotados
     code_index = ctx["code_index"]
     if code_index["empty"]:
         raise ValueError(
-            "Nenhum código encontrado nas anotações do projeto. "
-            "Execute 'abstract' ou 'document' primeiro para gerar anotações .syn."
+            "No code found in the project annotations. "
+            "Run 'abstract' or 'document' first to generate .syn annotations."
         )
 
-    # 4. Derivar códigos pendentes
-    pending_codes = _get_pending_codes(ctx, update)
-    if not pending_codes:
-        return (
-            "Nenhum código pendente — todos os códigos já possuem entrada ONTOLOGY.\n"
-            "Use sem --update para regenerar todas as entradas."
+    # 4. Destino e plano. O destino e um unico .syno (Spec A0, item 3): o
+    # --output, que precisa ser local quando e um INCLUDE do projeto.
+    try:
+        destination = resolve_destination(project_path, output_path)
+    except DestinationError as exc:
+        raise ValueError(str(exc)) from exc
+    snapshot = InputSnapshot.take(project_path, destination)
+    # newline="": os fins de linha do original chegam intactos à mesclagem, que
+    # os preserva (CRLF continua CRLF); read_text os normalizaria para LF.
+    original = ""
+    if destination.path.is_file():
+        with open(destination.path, encoding="utf-8", newline="") as fh:
+            original = fh.read()
+    dest_blocks = existing_blocks(original)
+    elsewhere: Set[str] = set()
+    for other in destination.ontology_files.values():
+        try:
+            elsewhere.update(existing_blocks(other.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+
+    gen_ctx = _generation_ctx(ctx)
+    if not gen_ctx["ontology_fields"]:
+        raise ValueError(
+            "The template only has CODE/CHAIN fields in the ONTOLOGY scope: the ontology mode "
+            "generates descriptive fields and has nothing to produce."
         )
+    plan, other_file = _plan_work(_get_pending_codes(ctx, update=False), gen_ctx, dest_blocks, elsewhere, update)
+    if other_file:
+        logger.info(
+            "%d code(s) have a block in another .syno of the project and are left for a "
+            "run with that destination (--output): %s",
+            len(other_file), ", ".join(sorted(other_file)[:10]),
+        )
+    if not plan:
+        return (
+            "No pending code — every code already has a complete ONTOLOGY entry "
+            "in the destination.\nRun without --update to regenerate the generated fields."
+        )
+    gen_ctx["_existing_blocks"] = {concept_key(c): dest_blocks[concept_key(c)]
+                                   for c in plan if concept_key(c) in dest_blocks}
+    gen_ctx["_wanted_fields"] = {concept_key(c): w for c, w in plan.items() if w is not None}
+    pending_codes = sorted(plan)
 
     total = len(pending_codes)
     logger.info(
-        "=== Gerando ONTOLOGY para %d código(s) (concorrência: %d) ===",
+        "=== Generating ONTOLOGY for %d code(s) (concurrency: %d) ===",
         total, concurrent,
     )
 
@@ -432,7 +530,7 @@ async def _process_ontology_async(
     start_time = time.monotonic()
 
     tasks = [
-        _process_one_code(code, ctx, llm_client, semaphore)
+        _process_one_code(code, gen_ctx, llm_client, semaphore)
         for code in pending_codes
     ]
 
@@ -441,7 +539,7 @@ async def _process_ontology_async(
     results: List[Tuple[str, str]] = []  # (code, syno_output) — apenas válidos
     rejected: List[Tuple[str, str]] = []  # (code, syno_output) — falharam validação
 
-    progress = BatchProgress(total, unit="cód", usage=llm_client.usage)
+    progress = BatchProgress(total, unit="code", usage=llm_client.usage)
     progress.start()
     for coro in asyncio.as_completed(tasks):
         code, syno_output, success = await coro
@@ -453,54 +551,74 @@ async def _process_ontology_async(
             rejected.append((code, syno_output))
         progress.mark(success=success, detail=code)
 
-    # 7. Combinar entradas VÁLIDAS e gravar .syno
-    # Blocos que falharam a validação (com `# ERRO: validação falhou` e texto
-    # possivelmente malformado) NÃO entram no .syno — gravá-los corromperia o
-    # arquivo para qualquer `compile`/`load` posterior. Vão para um arquivo
-    # `.rejeitados` separado, preservando o diagnóstico sem quebrar o .syno.
-    output_path = Path(output_path).resolve()
+    # 7. Mesclar no destino. Bloco existente: so os campos gerados (os demais
+    # campos, a ordem, os comentarios e os campos de varias linhas ficam). Sem
+    # bloco: bloco novo no fim do arquivo. O resto do arquivo volta como estava.
+    generated_names = set(gen_ctx["ontology_fields"])
+    changes: Dict[str, Dict[str, List[str]]] = {}
+    new_blocks: Dict[str, str] = {}
+    for code, syno in sorted(results):
+        key = concept_key(code)
+        if key in dest_blocks:
+            planned = plan[code]
+            allowed = planned if planned is not None else generated_names
+            fields = {n: v for n, v in entries_by_field(syno).items() if n in allowed}
+            if fields:
+                changes[key] = fields
+        else:
+            new_blocks[key] = syno
+
+    def build(accepted: Set[str]) -> str:
+        return merge_into_syno(
+            original,
+            {k: v for k, v in changes.items() if k in accepted},
+            {k: v for k, v in new_blocks.items() if k in accepted},
+        )
+
+    # 8. Validar o CONJUNTO (projeto inteiro em memoria, com o destino alterado)
+    # e conferir as entradas lidas no inicio antes de gravar.
+    changed_keys = set(changes) | set(new_blocks)
+    combined, set_rejected = validate_changes(ctx, destination, original, build, changed_keys)
+    dest_changed, others_changed = snapshot.changed()
+    if dest_changed:
+        raise RuntimeError(
+            f"{destination.path} was changed during the run; nothing was written. "
+            "Run again on the current version."
+        )
+    if others_changed:
+        # R3 (avaliação de 2026-11-17): a geração e a validação usaram o
+        # contexto lido no início; com outra entrada mudada, nada é gravado.
+        names = ", ".join(sorted(p.name for p in others_changed))
+        raise RuntimeError(
+            f"Project inputs changed during the run ({names}); nothing was written. "
+            "The entries were generated and validated against the previous version. Run again."
+        )
+    for key, messages in sorted(set_rejected.items()):
+        total_ok -= 1
+        total_fail += 1
+        rejected.append((key, f"# ERROR: rejected by the project validation: {key}\n"
+                              + "\n".join(f"#   {m}" for m in messages)))
+
+    output_path = destination.path
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Ordenar por nome de código para output determinístico
-    results.sort(key=lambda x: x[0])
-    combined = "\n\n".join(syno for _, syno in results)
-
-    # Em modo --update, os códigos JÁ definidos foram deliberadamente pulados
-    # em _get_pending_codes(): eles não estão em `results`. Gravar apenas
-    # `results` apagaria justamente as entradas preservadas — inclusive
-    # definições curadas à mão. O conteúdo existente é, portanto, preservado
-    # na íntegra e as novas entradas são ANEXADAS ao final.
-    if update and output_path.is_file():
-        existing = output_path.read_text(encoding="utf-8").rstrip("\n")
-        if existing:
-            combined = (
-                existing
-                + "\n\n"
-                + _UPDATE_SECTION_HEADER.format(count=len(results))
-                + "\n\n"
-                + combined
-            )
-
-    # Escrita atômica com proteção de sobrescrita e backup opcional
-    # Em modo --update o arquivo já existe e é reescrito (conteúdo anterior
-    # preservado acima); fora dele, --overwrite é exigido para substituir.
     safe_write_output(
-        output_path, combined + "\n",
+        output_path, combined if combined.endswith("\n") else combined + "\n",
         overwrite=update or overwrite,
         backup=backup,
+        newline="",  # bytes como compostos: os fins de linha do original ficam
     )
-    logger.info("Escrito: %s", output_path)
+    logger.info("Written: %s", output_path)
 
     if rejected:
         rejected.sort(key=lambda x: x[0])
-        rejected_path = output_path.with_suffix(output_path.suffix + ".rejeitados")
+        rejected_path = output_path.with_suffix(output_path.suffix + ".rejected")
         rejected_text = "\n\n".join(syno for _, syno in rejected)
         safe_write_output(
             rejected_path, rejected_text + "\n", overwrite=True, backup=False,
         )
         logger.warning(
-            "%d bloco(s) falharam validação e foram gravados em %s "
-            "(NÃO incluídos no .syno para não corrompê-lo)",
+            "%d block(s) failed validation and were written to %s "
+            "(NOT included in the .syno, to avoid corrupting it)",
             len(rejected), rejected_path,
         )
 
@@ -519,17 +637,17 @@ async def _process_ontology_async(
         elapsed=elapsed,
         output=str(output_path),
         llm_client=llm_client,
-        unit="entradas",
+        unit="entries",
     )
     # Sumário é o valor de RETORNO do modo; a CLI o imprime. Logar duplicaria.
 
     if format == "verbose":
         header = (
             f"# synesis-coder ontology\n"
-            f"# projeto: {project_path.stem}\n"
-            f"# total: {total} | OK: {total_ok} | falhas: {total_fail}\n"
+            f"# project: {project_path.stem}\n"
+            f"# total: {total} | OK: {total_ok} | failures: {total_fail}\n"
             f"# {llm_client.usage.summary_line()}\n"
-            f"# tempo: {elapsed:.1f}s\n"
+            f"# time: {elapsed:.1f}s\n"
         )
         return header + "\n" + summary
 

@@ -87,7 +87,7 @@ def test_runtime_banner_emits_via_logger(caplog):
     # O banner descreve o motor em bloco (Fase 5); antes era a linha "Motor:".
     with caplog.at_level(logging.INFO, logger=runtime_info.__name__):
         runtime_banner(_FakeClient("anthropic", "claude-opus-4-6", False))
-    assert any("Modelo" in rec.message for rec in caplog.records)
+    assert any("Model" in rec.message for rec in caplog.records)
 
 
 def test_runtime_banner_keeps_sdk_hint_for_anthropic_free_text(caplog):
@@ -153,10 +153,10 @@ def test_short_model_name_strips_repo_and_quantization_path():
 def test_campaign_summary_has_core_facts():
     out = campaign_summary(
         mode="abstract", project="face85", total=25, ok=23, failed=2,
-        elapsed=1005.0, output="out/", unit="referências",
+        elapsed=1005.0, output="out/", unit="references",
     )
     assert "abstract · face85" in out
-    assert "25 total" in out and "23 OK (92%)" in out and "2 falhas" in out
+    assert "25 total" in out and "23 OK (92%)" in out and "2 failures" in out
     assert "16m45s" in out          # duração legível, não "1005.0s"
     assert "out/" in out
 
@@ -182,8 +182,8 @@ def test_campaign_summary_reports_corrections_and_fallbacks():
         llm_client=_FakeUsageClient(api_calls=9, corrections=3,
                                     schema_fallbacks=2),
     )
-    assert "chamadas 9" in out
-    assert "correções 3" in out
+    assert "calls 9" in out
+    assert "corrections 3" in out
     assert "fallbacks 2" in out
 
 
@@ -194,27 +194,27 @@ def test_campaign_summary_hides_zero_corrections_and_fallbacks():
         elapsed=60.0, output="o/",
         llm_client=_FakeUsageClient(api_calls=3),
     )
-    assert "chamadas 3" in out
-    assert "correções" not in out
+    assert "calls 3" in out
+    assert "corrections" not in out
     assert "fallbacks" not in out
 
 
-def test_campaign_summary_thousands_separator_is_pt_br():
+def test_campaign_summary_thousands_separator_is_english():
     out = campaign_summary(
         mode="abstract", project="p", total=1, ok=1, failed=0,
         elapsed=10.0, output="o/",
         llm_client=_FakeUsageClient(total_prompt_tokens=412300,
                                     output_tokens=88140),
     )
-    assert "412.300" in out
-    assert "412,300" not in out
+    assert "412,300" in out
+    assert "412.300" not in out
 
 
 def test_campaign_summary_skipped_only_when_resuming():
     base = dict(mode="abstract", project="p", total=5, ok=5, failed=0,
                 elapsed=10.0, output="o/")
     assert "Retomadas" not in campaign_summary(**base)
-    assert "Retomadas   4" in campaign_summary(**base, skipped=4)
+    assert "Resumed     4" in campaign_summary(**base, skipped=4)
 
 
 def test_campaign_summary_zero_total_does_not_divide_by_zero():
@@ -240,12 +240,12 @@ def test_engine_banner_shows_everything_a_local_model_knows():
         source="Ollama",
     )
     out = build_engine_banner(facts, concurrent=1, json_path=True, thinking_off=True)
-    assert "26.9B parâmetros" in out
+    assert "26.9B parameters" in out
     assert "IQ3_S" in out
-    assert "16.384 de 262.144" in out
+    assert "16,384 of 262,144" in out
     assert "192.168.1.47" in out
-    assert "concorrência 1" in out
-    assert "raciocínio desativado" in out
+    assert "concurrency 1" in out
+    assert "reasoning off" in out
 
 
 def test_engine_banner_omits_absent_axes_never_prints_unknown():
@@ -257,10 +257,10 @@ def test_engine_banner_omits_absent_axes_never_prints_unknown():
         ModelFacts(display_name="Claude Sonnet 5", context_window=200000),
         concurrent=5,
     )
-    assert "Servidor" not in out
-    assert "parâmetros" not in out
-    assert "desconhecido" not in out.lower()
-    assert "janela 200.000" in out
+    assert "Server" not in out
+    assert "parameters" not in out
+    assert "unknown" not in out.lower()
+    assert "window 200,000" in out
 
 
 def test_engine_banner_minimal_facts_still_renders():
@@ -269,7 +269,7 @@ def test_engine_banner_minimal_facts_still_renders():
 
     out = build_engine_banner(ModelFacts(display_name="gpt-5.6-luna"))
     assert "gpt-5.6-luna" in out
-    assert "extração JSON" in out
+    assert "JSON extraction" in out
 
 
 def test_engine_banner_does_not_repeat_quantization_in_name():
@@ -343,7 +343,7 @@ def test_prompt_too_large_warns_before_the_call(caplog):
     with caplog.at_level(logging.WARNING, logger=runtime_info.__name__):
         fired = warn_prompt_too_large(facts, estimated_tokens=8353)
     assert fired
-    assert "8.353" in caplog.text and "4.096" in caplog.text
+    assert "8,353" in caplog.text and "4,096" in caplog.text
 
 
 def test_prompt_within_window_is_silent(caplog):
@@ -392,7 +392,7 @@ def test_campaign_summary_survives_mock_client():
         mode="ontology", project="p", total=1, ok=1, failed=0,
         elapsed=5.0, output="o.syno", llm_client=MagicMock(),
     )
-    assert "chamadas 0" in out
+    assert "calls 0" in out
     assert "5s" in out
 
 

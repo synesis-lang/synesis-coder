@@ -132,16 +132,16 @@ class TestCheckAnchoring:
 class TestFormatReport:
     def test_clean_report(self):
         out = format_report([], 10)
-        assert "nenhum problema" in out
+        assert "no problems" in out
         assert "10" in out
 
     def test_report_lists_issues(self):
         issues = [AnchorIssue("smith2024", 3, "some excerpt")]
         out = format_report(issues, 10)
-        assert "1 de 10" in out
+        assert "1 of 10" in out
         assert "10.0%" in out
         assert "smith2024" in out
-        assert "linha 3" in out
+        assert "line 3" in out
 
     def test_long_excerpt_truncated(self):
         issues = [AnchorIssue("x", 1, "y" * 200)]

@@ -269,7 +269,7 @@ class TestCalibrationWarning:
         w = _calibration_warning(0.306, 108)
         assert w is not None
         assert "0.306" in w
-        assert "descalibrado" in w
+        assert "miscalibrated" in w
 
     def test_silent_above_threshold(self):
         assert _calibration_warning(0.85, 108) is None

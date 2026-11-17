@@ -183,17 +183,17 @@ class TestDebugRecorderRender:
         self._populate(rec)
         md = rec.render_markdown()
 
-        assert "# Relatório de Depuração — synesis-coder" in md
+        assert "# Debug Report — synesis-coder" in md
         assert "social_acceptance" in md
         assert "@smith2024" in md
-        assert "Etapa 1 — Geração do bloco SOURCE" in md
-        assert "Etapa 2 — Codificação dos trechos" in md
-        assert "Trecho 1 de 2" in md
-        assert "Trecho 2 de 2" in md
+        assert "Step 1 — Generating the SOURCE block" in md
+        assert "Step 2 — Coding the excerpts" in md
+        assert "Chunk 1 of 2" in md
+        assert "Chunk 2 of 2" in md
         # Erro amigável + correção visíveis
         assert "REDUCES" in md
         assert "INFLUENCES" in md
-        assert "Resumo da sessão" in md
+        assert "Session summary" in md
 
     def test_render_marks_success_and_failure(self):
         rec = DebugRecorder()
@@ -209,13 +209,13 @@ class TestDebugRecorderRender:
         rec.write(target)
         assert target.exists()
         content = target.read_text(encoding="utf-8")
-        assert "Relatório de Depuração" in content
+        assert "Debug Report" in content
 
     def test_chunks_rendered_in_order(self):
         rec = DebugRecorder()
         self._populate(rec)
         md = rec.render_markdown()
-        assert md.index("Trecho 1 de 2") < md.index("Trecho 2 de 2")
+        assert md.index("Chunk 1 of 2") < md.index("Chunk 2 of 2")
 
     def test_full_content_not_truncated(self):
         """Prompts/documentos longos devem aparecer na íntegra (sem reticências).
@@ -309,30 +309,30 @@ class TestEntryUnitRender:
     def _make(self) -> DebugRecorder:
         return DebugRecorder(
             unit_type="entry",
-            unit_label="Referência",
-            coding_step_title="Etapa 1 — Codificação dos abstracts",
+            unit_label="Reference",
+            coding_step_title="Step 1 — Coding the abstracts",
         )
 
     def test_uses_entry_labels_and_bibref(self):
         rec = self._make()
         self._populate(rec)
         md = rec.render_markdown()
-        assert "Etapa 1 — Codificação dos abstracts" in md
-        assert "Referência 1 de 2 — @silva2024" in md
-        assert "Referência 2 de 2 — @souza2025" in md
+        assert "Step 1 — Coding the abstracts" in md
+        assert "Reference 1 of 2 — @silva2024" in md
+        assert "Reference 2 of 2 — @souza2025" in md
         # rótulos do cabeçalho/rodapé adaptados à unidade "entry"
         assert "**Corpus:** face85.bib" in md
-        assert "referência(s) com abstract" in md
-        assert "Referências processadas" in md
+        assert "reference(s) with abstract" in md
+        assert "References processed" in md
         # não deve usar a vocabulário de chunking do modo document
-        assert "Configuração de chunking" not in md
-        assert "Trecho 1" not in md
+        assert "Chunking settings" not in md
+        assert "Chunk 1" not in md
 
     def test_entries_rendered_in_order(self):
         rec = self._make()
         self._populate(rec)
         md = rec.render_markdown()
-        assert md.index("Referência 1") < md.index("Referência 2")
+        assert md.index("Reference 1") < md.index("Reference 2")
 
 
 # ---------------------------------------------------------------------------

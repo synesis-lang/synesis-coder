@@ -56,8 +56,8 @@ def _load_from_project(project_path: Path) -> List[Dict[str, str]]:
     result = ctx["result"]
     if not result.linked_project:
         raise ValueError(
-            f"Projeto '{project_path.stem}' não compilou com sucesso. "
-            "Verifique erros no projeto."
+            f"Project '{project_path.stem}' did not compile successfully. "
+            "Check the project errors."
         )
 
     from synesis.exporters.alpaca_export import build_alpaca_pairs
@@ -66,7 +66,7 @@ def _load_from_project(project_path: Path) -> List[Dict[str, str]]:
         result.template,
         result.bibliography,
     )
-    logger.info("Camada 1: %d pares gerados de '%s'", len(pairs), project_path.stem)
+    logger.info("Layer 1: %d pairs generated from '%s'", len(pairs), project_path.stem)
     return pairs
 
 
@@ -81,13 +81,13 @@ def _load_from_jsonl(input_path: Path) -> List[Dict[str, str]]:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as exc:
-                logger.warning("Linha %d ignorada (JSON inválido): %s", lineno, exc)
+                logger.warning("Line %d skipped (invalid JSON): %s", lineno, exc)
                 continue
             if "instruction" in obj and "output" in obj:
                 pairs.append(obj)
             else:
-                logger.warning("Linha %d ignorada (campos obrigatórios ausentes)", lineno)
-    logger.info("JSONL: %d pares carregados de '%s'", len(pairs), input_path.name)
+                logger.warning("Line %d skipped (required fields missing)", lineno)
+    logger.info("JSONL: %d pairs loaded from '%s'", len(pairs), input_path.name)
     return pairs
 
 
@@ -268,7 +268,7 @@ async def _enrich_one(
                     })
                     counts["vary"] += 1
             except Exception as exc:
-                logger.warning("vary falhou: %s", exc)
+                logger.warning("vary failed: %s", exc)
 
         # --- didactic e counterfactual: apenas pares chain/causal ---
         if _is_chain_pair(pair):
@@ -286,7 +286,7 @@ async def _enrich_one(
                         })
                         counts["didactic"] += 1
                 except Exception as exc:
-                    logger.warning("didactic falhou: %s", exc)
+                    logger.warning("didactic failed: %s", exc)
 
             if "counterfactual" in enrich_types:
                 try:
@@ -302,7 +302,7 @@ async def _enrich_one(
                         })
                         counts["counterfactual"] += 1
                 except Exception as exc:
-                    logger.warning("counterfactual falhou: %s", exc)
+                    logger.warning("counterfactual failed: %s", exc)
 
         return new_pairs, counts
 
@@ -383,12 +383,12 @@ def process_finetune(
     """
     if project_path is None and input_path is None:
         raise ValueError(
-            "Forneça --project (gera dataset via compilador) "
-            "ou --input (carrega JSONL pré-gerado)."
+            "Provide --project (builds the dataset with the compiler) "
+            "or --input (loads a pre-generated JSONL)."
         )
     if project_path is not None and input_path is not None:
         raise ValueError(
-            "--project e --input são mutuamente exclusivos. Use apenas um."
+            "--project and --input are mutually exclusive. Use only one."
         )
 
     enrich_types = set(enrich) if enrich else {"vary"}
@@ -445,8 +445,8 @@ async def _process_finetune_async(
 
     if not pairs:
         raise ValueError(
-            "Nenhum par de qualidade suficiente após filtro. "
-            "Verifique se o projeto tem anotações."
+            "No pair of sufficient quality after filtering. "
+            "Check whether the project has annotations."
         )
 
     # 3. Enriquecimento LLM (se houver tipos selecionados)
@@ -456,7 +456,7 @@ async def _process_finetune_async(
     if enrich_types:
         total_to_process = len(pairs)
         logger.info(
-            "=== Enriquecendo %d pares | tipos: %s | concorrência: %d ===",
+            "=== Enriching %d pairs | types: %s | concurrency: %d ===",
             total_to_process, ", ".join(sorted(enrich_types)), concurrent,
         )
 
@@ -470,7 +470,7 @@ async def _process_finetune_async(
         ]
 
         total_new = 0
-        progress = BatchProgress(total_to_process, unit="par", usage=llm_client.usage)
+        progress = BatchProgress(total_to_process, unit="pair", usage=llm_client.usage)
         progress.start()
 
         for coro in asyncio.as_completed(tasks):
@@ -479,7 +479,7 @@ async def _process_finetune_async(
             total_new += len(new_pairs)
             for t, n in counts.items():
                 type_totals[t] += n
-            progress.mark(detail=f"+{total_new} novos")
+            progress.mark(detail=f"+{total_new} new")
     else:
         llm_client = None  # type: ignore[assignment]
 
@@ -489,7 +489,7 @@ async def _process_finetune_async(
     # 5. Deduplicar
     all_pairs, n_dupes = _deduplicate(all_pairs)
     if n_dupes > 0:
-        logger.info("Deduplicação: %d duplicatas removidas", n_dupes)
+        logger.info("Deduplication: %d duplicates removed", n_dupes)
 
     # 6. Gravar JSONL (escrita atômica com proteção de sobrescrita e backup)
     import io
@@ -512,18 +512,18 @@ async def _process_finetune_async(
     breakdown_str = "  Breakdown:    " + " | ".join(breakdown_parts) if breakdown_parts else ""
 
     summary_lines = [
-        f"Fine-tuning dataset gerado em {elapsed:.1f}s",
+        f"Fine-tuning dataset generated in {elapsed:.1f}s",
         f"  Carregados:   {total_loaded}",
         f"  Descartados:  {n_discarded} (qualidade)",
         f"  Originais:    {len(pairs)}",
-        f"  Enriquecidos: {len(enriched_pairs)} novos pares",
+        f"  Enriched:     {len(enriched_pairs)} new pairs",
     ]
     if breakdown_str:
         summary_lines.append(breakdown_str)
     summary_lines += [
         f"  Duplicatas:   {n_dupes} removidas",
         f"  Total final:  {len(all_pairs)}",
-        f"  Saída:        {output_path}",
+        f"  Output:       {output_path}",
     ]
     summary = "\n".join(summary_lines)
 
@@ -533,18 +533,18 @@ async def _process_finetune_async(
 
     if format == "verbose":
         source_label = (
-            f"projeto: {project_path.stem}" if project_path
+            f"project: {project_path.stem}" if project_path
             else f"input: {input_path.name}"  # type: ignore[union-attr]
         )
         token_line = (
             llm_client.usage.summary_line()
             if llm_client is not None
-            else "tokens: N/A (sem enriquecimento LLM)"
+            else "tokens: N/A (no LLM enrichment)"
         )
         header = (
             f"# synesis-coder finetune\n"
             f"# {source_label}\n"
-            f"# enrich: {', '.join(sorted(enrich_types)) or 'nenhum'}\n"
+            f"# enrich: {', '.join(sorted(enrich_types)) or 'none'}\n"
             f"# {token_line}\n"
             f"# tempo: {elapsed:.1f}s\n"
         )

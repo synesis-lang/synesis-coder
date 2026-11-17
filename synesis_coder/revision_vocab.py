@@ -132,8 +132,8 @@ def resolve_sensitivity(value: str | float | None) -> tuple[float, str]:
             numeric = float(key)
         except ValueError as exc:
             raise ValueError(
-                f"Sensibilidade inválida: {value!r}. "
-                f"Use {'/'.join(SENSITIVITY_LEVELS)} ou um número entre 0 e 1."
+                f"Invalid sensitivity: {value!r}. "
+                f"Use {'/'.join(SENSITIVITY_LEVELS)} or a number between 0 and 1."
             ) from exc
     else:
         numeric = float(value)

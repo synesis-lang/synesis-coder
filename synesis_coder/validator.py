@@ -27,9 +27,9 @@ _log = logging.getLogger(__name__)
 CORRECTION_TEMPERATURES = [0.0, 0.2, 0.5]
 
 _FIX_REJECTED_MSG = (
-    "Correção rejeitada: o LLM devolveu MENOS blocos do que recebeu "
-    "(truncagem). Mantendo a versão anterior e seguindo para a próxima "
-    "tentativa."
+    "Correction rejected: the LLM returned FEWER blocks than it received "
+    "(truncation). Keeping the previous version and moving on to the next "
+    "attempt."
 )
 
 
@@ -197,7 +197,7 @@ def _run_json_fix(
     try:
         candidate = json_fix(previous, errors, temperature)
     except Exception as exc:  # noqa: BLE001 — a correção em texto livre segue
-        _log.warning("Correção pelo caminho JSON falhou (%s) — usando texto livre.", exc)
+        _log.warning("Correction via the JSON path failed (%s) — using free text.", exc)
         return None
     return candidate if candidate and candidate.strip() else None
 
@@ -211,7 +211,7 @@ async def _run_json_fix_async(
     try:
         candidate = await json_fix(previous, errors, temperature)
     except Exception as exc:  # noqa: BLE001 — a correção em texto livre segue
-        _log.warning("Correção pelo caminho JSON falhou (%s) — usando texto livre.", exc)
+        _log.warning("Correction via the JSON path failed (%s) — using free text.", exc)
         return None
     return candidate if candidate and candidate.strip() else None
 
@@ -267,7 +267,7 @@ def validate_and_fix(
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
-            last_errors = f"Erro de parse: {exc}"
+            last_errors = f"Parse error: {exc}"
             if attempt >= max_tries:
                 break
             temperature = CORRECTION_TEMPERATURES[
@@ -371,7 +371,7 @@ async def validate_and_fix_async(
                 dataset_index=ctx.get("dataset_index"),
             )
         except Exception as exc:
-            last_errors = f"Erro de parse: {exc}"
+            last_errors = f"Parse error: {exc}"
             if recorder is not None:
                 recorder.record_validation(
                     attempt=attempt, submitted=output, success=False,
@@ -450,7 +450,7 @@ def _fix_diagnostics(result) -> str:
     e apagou as chains "para evitar erros de validação": 269 de 347 ITEMs
     ficaram sem chain. Avisos continuam no log, no --debug e no bloco de falha.
     """
-    lines = ["=== ERROS ==="]
+    lines = ["=== ERRORS ==="]
     for err in result.validation_result.errors:
         lines.append(err.to_diagnostic())
         lines.append("")
@@ -477,15 +477,15 @@ def _failure_output(output: str, diagnostics: str, max_tries: int, *, bibref: bo
     """Saída comentada de um registro que não validou."""
     if bibref:
         header = (
-            "# ERRO: referência fora da bibliografia do projeto — não corrigível pelo modelo.\n"
-            "# A chave do registro é dada pela campanha; trocá-la atribuiria o texto a outra\n"
-            "# fonte. Verifique o INCLUDE BIBLIOGRAPHY do .synp.\n"
-            "# Diagnóstico:\n"
+            "# ERROR: reference outside the project bibliography — not fixable by the model.\n"
+            "# The record key is given by the campaign; changing it would attribute the text to another\n"
+            "# source. Check the INCLUDE BIBLIOGRAPHY of the .synp.\n"
+            "# Diagnostic:\n"
         )
     else:
         header = (
-            f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
-            f"# Último diagnóstico:\n"
+            f"# ERROR: validation failed after {max_tries} attempt(s)\n"
+            f"# Last diagnostic:\n"
         )
     commented = "\n".join(f"# {line}" for line in diagnostics.splitlines())
     return header + commented + "\n\n" + output
@@ -507,9 +507,14 @@ def _has_structural_errors(result) -> bool:
         # Se OrphanItem não existe nesta versão do compilador, usar has_errors()
         return result.has_errors()
 
+    # UndeclaredConcept (SYNESIS_E101, synesis >= 0.15): conceito citado num CODE
+    # do ONTOLOGY sem bloco. Validando UM bloco isolado, os demais conceitos não
+    # estão carregados; a referência é conferida na validação do conjunto
+    # (ontology_publish.validate_changes), com o projeto inteiro.
     structural_errors = [
         err for err in result.validation_result.errors
         if not isinstance(err, OrphanItem)
+        and getattr(err, "CODE", "") != "SYNESIS_E101"
     ]
     return len(structural_errors) > 0
 
@@ -608,7 +613,7 @@ def validate_ontology_entry(
         try:
             result = synesis.load(**_ontology_load_kwargs(ctx, ontology_key, output))
         except Exception as exc:
-            last_errors = f"Erro de parse: {exc}"
+            last_errors = f"Parse error: {exc}"
             if attempt >= max_tries:
                 break
             temperature = CORRECTION_TEMPERATURES[
@@ -647,8 +652,8 @@ def validate_ontology_entry(
             _log.warning(_FIX_REJECTED_MSG)
 
     error_header = (
-        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
-        f"# Último diagnóstico:\n"
+        f"# ERROR: validation failed after {max_tries} attempt(s)\n"
+        f"# Last diagnostic:\n"
     )
     commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
     return error_header + commented_errors + "\n\n" + output, False
@@ -673,7 +678,7 @@ async def validate_ontology_entry_async(
         try:
             result = synesis.load(**_ontology_load_kwargs(ctx, ontology_key, output))
         except Exception as exc:
-            last_errors = f"Erro de parse: {exc}"
+            last_errors = f"Parse error: {exc}"
             if attempt >= max_tries:
                 break
             temperature = CORRECTION_TEMPERATURES[
@@ -712,8 +717,8 @@ async def validate_ontology_entry_async(
             _log.warning(_FIX_REJECTED_MSG)
 
     error_header = (
-        f"# ERRO: validação falhou após {max_tries} tentativa(s)\n"
-        f"# Último diagnóstico:\n"
+        f"# ERROR: validation failed after {max_tries} attempt(s)\n"
+        f"# Last diagnostic:\n"
     )
     commented_errors = "\n".join(f"# {line}" for line in last_errors.splitlines())
     return error_header + commented_errors + "\n\n" + output, False

@@ -129,4 +129,4 @@ class TestNormalizePorTipo:
             inv, out, candidate_groups(f for g in inv.values() for f in g.variants)
         )
         texto = out.read_text(encoding="utf-8")
-        assert "Possíveis variantes" in texto and "pais | país" in texto
+        assert "Possible variants" in texto and "pais | país" in texto

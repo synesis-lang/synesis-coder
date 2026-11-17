@@ -187,7 +187,7 @@ class TestSchemaFallbackWarning:
         with caplog.at_level(logging.WARNING, logger="synesis_coder.runtime_info"):
             warn_schema_fallbacks(self._Client(2))
 
-        assert "TEXTO LIVRE" in caplog.text
+        assert "FREE TEXT" in caplog.text
         assert "2" in caplog.text
 
     def test_silent_when_no_fallback(self, caplog):

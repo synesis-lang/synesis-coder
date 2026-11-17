@@ -71,7 +71,7 @@ class TestTabela:
 
     def test_modelo_desconhecido_e_conservador(self):
         caps = ac.table_caps("modelo-x")
-        assert caps.temperature is True and not caps.thinking_types and caps.source == "padrão"
+        assert caps.temperature is True and not caps.thinking_types and caps.source == "default"
 
 
 # ---------------------------------------------------------------------------
@@ -103,19 +103,19 @@ class TestPlano:
         assert "thinking" not in p.params and p.thinks
         assert p.params["output_config"] == {"effort": "xhigh"}
         assert p.max_tokens == 4000 + 8000
-        assert "não desliga com esforço xhigh" in p.thinking_label
+        assert "does not turn off at effort xhigh" in p.thinking_label
 
     def test_opus_5_5_nao_desliga_e_recebe_reserva(self, caplog):
         p = _plan("claude-opus-5-5")
         assert "thinking" not in p.params and "temperature" not in p.params
         assert p.thinks and p.max_tokens == 4000 + 8000
-        assert p.thinking_label == "raciocínio adaptativo (não desliga neste modelo)"
-        assert any("raciocina por padrão" in r.message for r in caplog.records)
+        assert p.thinking_label == "adaptive reasoning (does not turn off on this model)"
+        assert any("reasons by default" in r.message for r in caplog.records)
 
     def test_orcamento_em_modelo_so_adaptativo_vira_adaptativo_com_aviso(self, caplog):
         p = _plan("claude-sonnet-5-5", want=True, budget=5000)
         assert p.params["thinking"] == {"type": "adaptive"}
-        assert any("não aceita orçamento" in r.message for r in caplog.records)
+        assert any("does not accept a budget" in r.message for r in caplog.records)
 
     def test_reserva_respeita_o_teto_de_saida(self):
         p = _plan("claude-opus-5-5", max_tokens=125000)
@@ -292,7 +292,7 @@ class TestClienteAnthropic:
         c.call([{"role": "user", "content": "y"}], max_tokens=100)
         assert c._client.messages.create.call_count == 3  # memorizado: sem nova falha
         assert "temperature" not in c._client.messages.create.call_args.kwargs
-        assert any("recusou temperature" in r.message for r in caplog.records)
+        assert any("rejected temperature" in r.message for r in caplog.records)
 
     def test_outro_400_nao_e_repetido_pela_correcao(self):
         c = _cliente("claude-sonnet-4-6")
@@ -305,11 +305,11 @@ class TestClienteAnthropic:
     def test_banner_descreve_o_raciocinio_que_roda(self):
         assert (
             _cliente("claude-opus-5-5").thinking_label()
-            == "raciocínio adaptativo (não desliga neste modelo)"
+            == "adaptive reasoning (does not turn off on this model)"
         )
         assert (
             _cliente("claude-sonnet-5-5").thinking_label()
-            == "raciocínio desativado (between_tools)"
+            == "reasoning off (between_tools)"
         )
         assert _cliente("claude-sonnet-4-6").thinking_label() == ""
 

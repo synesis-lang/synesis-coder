@@ -124,7 +124,7 @@ class TestParseBibEntries:
                 {"bibref": "no_abstract_1"},
                 {"bibref": "no_abstract_2"},
             ])
-            with pytest.raises(ValueError, match="Nenhuma entrada"):
+            with pytest.raises(ValueError, match="No entry with an abstract"):
                 parse_bib_entries(bib_path)
 
     def test_parse_bib_file_not_found(self):

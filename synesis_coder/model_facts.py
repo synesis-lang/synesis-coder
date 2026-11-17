@@ -115,7 +115,7 @@ def _http_json(url: str, *, data: Optional[dict] = None, headers: Optional[dict]
             parsed = json.load(resp)
         return parsed if isinstance(parsed, dict) else None
     except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
-        logger.debug("Metadados indisponíveis em %s: %s", url, exc)
+        logger.debug("Metadata unavailable at %s: %s", url, exc)
         return None
 
 
@@ -304,6 +304,6 @@ def fetch_model_facts(llm_client) -> ModelFacts:
         if "generativelanguage" in api_url:
             return _facts_gemini(model) or minimal
     except Exception as exc:  # defesa final: metadado nunca derruba campanha
-        logger.debug("Falha ao obter metadados do modelo: %s", exc)
+        logger.debug("Failed to get model metadata: %s", exc)
 
     return minimal

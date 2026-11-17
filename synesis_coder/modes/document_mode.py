@@ -112,11 +112,11 @@ def read_document(input_path: Path) -> str:
     """
     input_path = Path(input_path).resolve()
     if not input_path.exists():
-        raise FileNotFoundError(f"Documento não encontrado: {input_path}")
+        raise FileNotFoundError(f"Document not found: {input_path}")
 
     text = input_path.read_text(encoding="utf-8").strip()
     if not text:
-        raise ValueError(f"Documento está vazio: {input_path}")
+        raise ValueError(f"Document is empty: {input_path}")
 
     return text
 
@@ -358,7 +358,7 @@ def _build_source_context(
     Sem abstract, cai para os primeiros SOURCE_EXCERPT_CHARS do documento.
 
     Returns:
-        (contexto, origem) — origem é "abstract do .bib" ou "início do documento".
+        (contexto, origem) — origem é "abstract from the .bib" ou "início do documento".
     """
     entry = (ctx.get("bib_entries") or {}).get(bibref.lstrip("@").strip().lower()) or {}
     abstract = _clean_bib_value(entry.get("abstract", ""))
@@ -371,8 +371,8 @@ def _build_source_context(
         if keywords:
             parts.append(f"Keywords: {keywords}")
         parts.append(f"Abstract: {abstract}")
-        return "\n".join(parts), "abstract do .bib"
-    return document_excerpt[:SOURCE_EXCERPT_CHARS].strip(), "início do documento"
+        return "\n".join(parts), "abstract from the .bib"
+    return document_excerpt[:SOURCE_EXCERPT_CHARS].strip(), "start of the document"
 
 
 async def _generate_source_block(
@@ -414,18 +414,14 @@ async def _generate_source_block(
         if data is not None:
             return assemble_source(ctx, bibref, data)
     except Exception as exc:
-        logger.debug("Caminho JSON do SOURCE falhou (%s) — usando texto livre", exc)
+        logger.debug("SOURCE JSON path failed (%s) — using free text", exc)
 
     # Instrução especializada para gerar apenas SOURCE
     source_messages = [
         {
             "role": "system",
             "content": (
-                "Você é um codificador de pesquisa qualitativa.\n"
-                "Gere APENAS um bloco SOURCE Synesis para o documento abaixo.\n"
-                "NÃO gere blocos ITEM, ONTOLOGY ou qualquer outro tipo.\n"
-                "NÃO use markdown ou formatação extra.\n\n"
-                + _build_source_fields_instruction(ctx)
+                _source_text(ctx, "system") + _build_source_fields_instruction(ctx)
             ),
             "cache": True,
         },
@@ -434,7 +430,7 @@ async def _generate_source_block(
             "content": (
                 f"BIBREF: @{bibref}\n"
                 f"<excerpt>{excerpt}</excerpt>\n\n"
-                "Gere o bloco SOURCE para este documento."
+                + _source_text(ctx, "user")
             ),
             "cache": False,
         },
@@ -463,8 +459,8 @@ async def _generate_source_block(
 
     # Fallback: tentar construir um SOURCE mínimo
     logger.warning(
-        "Não foi possível extrair bloco SOURCE da resposta para %s — "
-        "usando SOURCE mínimo. Resposta (primeiros 200 chars): %r",
+        "Could not extract a SOURCE block from the response for %s — "
+        "using a minimal SOURCE. Response (first 200 chars): %r",
         bibref, raw[:200],
     )
     return _patch_required_source_fields(f"SOURCE @{bibref}\nEND SOURCE", ctx)
@@ -542,27 +538,62 @@ def _detect_block_indent(block: str) -> str:
     return "    "
 
 
+# Prompt do SOURCE em texto livre: segue o idioma do projeto
+# (SYNESIS_CODER_LANGUAGE, lido em ctx["output_language"]). Português quando o
+# projeto declara pt; inglês nos demais casos, inclusive sem declaração.
+_SOURCE_TEXTS = {
+    "pt": {
+        "system": (
+            "Você é um codificador de pesquisa qualitativa.\n"
+            "Gere APENAS um bloco SOURCE Synesis para o documento abaixo.\n"
+            "NÃO gere blocos ITEM, ONTOLOGY ou qualquer outro tipo.\n"
+            "NÃO use markdown ou formatação extra.\n\n"
+        ),
+        "user": "Gere o bloco SOURCE para este documento.",
+        "fields": "CAMPOS DO SOURCE:",
+        "no_fields": "CAMPOS DO SOURCE: nenhum campo definido no template.",
+        "format": "\nFORMATO:\n  SOURCE @{bibref}\n    {campo}: {valor}\n  END SOURCE",
+    },
+    "en": {
+        "system": (
+            "You are a qualitative research coder.\n"
+            "Generate ONLY one Synesis SOURCE block for the document below.\n"
+            "Do NOT generate ITEM, ONTOLOGY or any other block type.\n"
+            "Do NOT use markdown or extra formatting.\n\n"
+        ),
+        "user": "Generate the SOURCE block for this document.",
+        "fields": "SOURCE FIELDS:",
+        "no_fields": "SOURCE FIELDS: no field defined in the template.",
+        "format": "\nFORMAT:\n  SOURCE @{bibref}\n    {field}: {value}\n  END SOURCE",
+    },
+}
+
+
+def _source_language(ctx: dict) -> str:
+    language = str(ctx.get("output_language") or "").strip().lower()
+    return "pt" if language.startswith("pt") else "en"
+
+
+def _source_text(ctx: dict, key: str) -> str:
+    return _SOURCE_TEXTS[_source_language(ctx)][key]
+
+
 def _build_source_fields_instruction(ctx: dict) -> str:
     """Instrução sobre os campos SOURCE disponíveis no template."""
     source_fields = ctx.get("source_fields", {})
     required_source = ctx.get("required_source", [])
 
     if not source_fields:
-        return "CAMPOS DO SOURCE: nenhum campo definido no template."
+        return _source_text(ctx, "no_fields")
 
-    lines = ["CAMPOS DO SOURCE:"]
+    lines = [_source_text(ctx, "fields")]
     for name, spec in source_fields.items():
         req = "REQUIRED" if name in required_source else "OPTIONAL"
         # DESCRIPTION e GUIDELINES juntas, como nos demais prompts.
         instruction = describe_field(spec).replace("\n", "\n    ")
         lines.append(f"  {name} ({spec.type.name}) [{req}]: {instruction}")
 
-    lines.append(
-        "\nFORMATO:\n"
-        "  SOURCE @{bibref}\n"
-        "    {campo}: {valor}\n"
-        "  END SOURCE"
-    )
+    lines.append(_source_text(ctx, "format"))
     return "\n".join(lines)
 
 
@@ -757,7 +788,7 @@ async def _process_chunk(
     """
     async with semaphore:
         logger.debug(
-            "Processando chunk %d/%d de @%s", chunk_index + 1, total_chunks, bibref
+            "Processing chunk %d/%d of @%s", chunk_index + 1, total_chunks, bibref
         )
         context = ("chunk", chunk_index, total_chunks)
 
@@ -767,7 +798,7 @@ async def _process_chunk(
             )
         except Exception as exc:
             logger.error(
-                "Falha na chamada LLM para chunk %d de @%s: %s",
+                "LLM call failed for chunk %d of @%s: %s",
                 chunk_index + 1, bibref, exc,
             )
             return chunk_index, [], False
@@ -816,7 +847,7 @@ async def _process_chunk(
             )
 
         logger.debug(
-            "Chunk %d/%d: %d ITEMs extraídos (ok=%s)",
+            "Chunk %d/%d: %d ITEMs extracted (ok=%s)",
             chunk_index + 1, total_chunks, len(item_blocks), success,
         )
         return chunk_index, item_blocks, success
@@ -945,7 +976,7 @@ async def _process_chunks_versioned(
                 versoes += 1
     if versoes:
         logger.info(
-            "Lista de conceitos atualizada %d vez(es) durante o documento (lotes de %d trechos).",
+            "Concept list updated %d time(s) during the document (batches of %d chunks).",
             versoes, lote,
         )
     return results_by_index, total_ok, total_fail
@@ -979,7 +1010,7 @@ async def _process_document_async(
     chunks = split_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
     total_chunks = len(chunks)
     logger.info(
-        "Origem: %s (%s chars, %d chunks, −%.0f%% após limpeza)",
+        "Input: %s (%s chars, %d chunks, −%.0f%% after cleaning)",
         input_path.name, _human_chars(cleaned_len), total_chunks, reduction_pct,
     )
 
@@ -1011,7 +1042,7 @@ async def _process_document_async(
         )
 
     # 5. Gerar SOURCE block (primeiro trecho como contexto)
-    logger.debug("Gerando bloco SOURCE para @%s...", bibref)
+    logger.debug("Generating SOURCE block for @%s...", bibref)
     source_block = await _generate_source_block(
         ctx, bibref, chunks[0], llm_client
     )
@@ -1034,7 +1065,7 @@ async def _process_document_async(
         all_item_blocks.extend(results_by_index.get(i, []))
 
     logger.debug(
-        "Total de ITEMs antes da deduplicação: %d", len(all_item_blocks)
+        "Total ITEMs before deduplication: %d", len(all_item_blocks)
     )
 
     # 8. Deduplicar (nome do campo QUOTATION derivado do template)
@@ -1055,7 +1086,7 @@ async def _process_document_async(
         if b.strip().startswith("ITEM")
     ]
     logger.debug(
-        "ITEMs após deduplicação: %d", len(final_item_blocks)
+        "ITEMs after deduplication: %d", len(final_item_blocks)
     )
 
     # 9. Montar output final: SOURCE + ITEMs
@@ -1073,10 +1104,10 @@ async def _process_document_async(
         has_errors = _has_structural_errors(validation)
         if has_errors:
             diag = validation.get_diagnostics(verbose=False)
-            logger.warning("Validação final detectou erros estruturais:\n%s", diag)
+            logger.warning("Final validation found structural errors:\n%s", diag)
     except Exception as exc:
         has_errors = True
-        logger.warning("Validação final: erro de parse no output combinado: %s", exc)
+        logger.warning("Final validation: parse error in the combined output: %s", exc)
 
     # 11. Gravar output (escrita atômica, com proteção de sobrescrita e backup)
     output_path = Path(output_path).resolve()
@@ -1085,7 +1116,7 @@ async def _process_document_async(
 
     elapsed = time.monotonic() - start_time
     items_count = len(final_item_blocks)
-    status = "OK" if not has_errors else "COM AVISOS"
+    status = "OK" if not has_errors else "WITH WARNINGS"
 
     # Degradação silenciosa: chunks que caíram para texto livre rodaram sem as
     # restrições do schema, mas o .syn resultante é sintaticamente válido.
@@ -1101,15 +1132,15 @@ async def _process_document_async(
             items_dedup=items_count,
             tokens_line=llm_client.usage.summary_line(),
             elapsed=elapsed,
-            validation="✅ OK" if not has_errors else "⚠️ COM AVISOS",
+            validation="✅ OK" if not has_errors else "⚠️ WITH WARNINGS",
             output_file=output_path.name,
         )
         debug_path = output_path.parent / f"{project_path.stem}_{bibref}_debug.md"
         recorder.write(debug_path)
-        logger.debug("Relatório de debug escrito: %s", debug_path)
+        logger.debug("Debug report written: %s", debug_path)
 
     logger.log(21,  # OK
-        "Validação concluída. %d itens únicos extraídos (de %d totais) em %.1fs.",
+        "Validation finished. %d unique items extracted (of %d total) in %.1fs.",
         items_count, len(all_item_blocks), elapsed,
     )
     logger.log(22, "%s", output_path)  # DEST
@@ -1117,12 +1148,12 @@ async def _process_document_async(
     if format == "verbose":
         return (
             f"# synesis-coder document\n"
-            f"# projeto: {project_path.stem}\n"
+            f"# project: {project_path.stem}\n"
             f"# bibref: @{bibref}\n"
             f"# input: {input_path.name}\n"
-            f"# chunks: {total_chunks} | ITEMs: {items_count} | validação: {status}\n"
+            f"# chunks: {total_chunks} | ITEMs: {items_count} | validation: {status}\n"
             f"# {llm_client.usage.summary_line()}\n"
-            f"# tempo: {elapsed:.1f}s\n"
+            f"# time: {elapsed:.1f}s\n"
         )
 
     return ""

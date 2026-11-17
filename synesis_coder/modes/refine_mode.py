@@ -214,7 +214,7 @@ async def _refine_single_item(
             )
             if not ok:
                 _log.warning(
-                    "ITEM @%s iter %d: re-extração inválida — mantendo versão anterior",
+                    "ITEM @%s iter %d: invalid re-extraction — keeping the previous version",
                     bibref, it,
                 )
                 break
@@ -222,7 +222,7 @@ async def _refine_single_item(
             norm = _normalize_block(candidate)
             if norm in history:
                 _log.info(
-                    "ITEM @%s iter %d: ponto-fixo/oscilação detectada — parando",
+                    "ITEM @%s iter %d: fixed point/oscillation detected — stopping",
                     bibref, it,
                 )
                 break
@@ -236,7 +236,7 @@ async def _refine_single_item(
 
             if cand_score >= best_score:
                 _log.info(
-                    "ITEM @%s iter %d: score %.2f não melhora %.2f — parando (não-regressão)",
+                    "ITEM @%s iter %d: score %.2f does not improve on %.2f — stopping (non-regression)",
                     bibref, it, cand_score, best_score,
                 )
                 break
@@ -322,7 +322,7 @@ def _build_metrics_header(
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     lines: list[str] = [
-        "# --- Fase R: Refine (re-extração com feedback, LLM) ---",
+        "# --- Stage R: Refine (re-extraction with feedback, LLM) ---",
         f"# $metrics.source: {syn_path.name}",
         f"# $metrics.timestamp: {now}",
         f"# $metrics.refine.critique_model: {critique_model}",
@@ -330,11 +330,11 @@ def _build_metrics_header(
         f"# $metrics.refine.max_iter: {max_iter}",
         f"# $metrics.refine.threshold: {suspicion_threshold}",
         f"# $metrics.refine.items_total: {total}",
-        "# $metrics.refine.items_total.formula: total de blocos ITEM no .syn de entrada",
+        "# $metrics.refine.items_total.formula: total ITEM blocks in the input .syn",
         f"# $metrics.refine.items_entered_loop: {entered}",
         "# $metrics.refine.items_entered_loop.formula: ITEMs com score inicial >= threshold",
         f"# $metrics.refine.items_improved: {improved}",
-        "# $metrics.refine.items_improved.formula: ITEMs cuja melhor versão difere da original",
+        "# $metrics.refine.items_improved.formula: ITEMs whose best version differs from the original",
         f"# $metrics.refine.iterations_mean: {iters_mean:.3f}",
         "# $metrics.refine.iterations_mean.formula: media de re-extracoes executadas por ITEM",
         f"# $metrics.refine.score_reduction_mean: {reduction_mean:.3f}",
@@ -432,22 +432,22 @@ async def _process_refine_async(
 
     syn_path = Path(syn_path).resolve()
     if not syn_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {syn_path}")
+        raise FileNotFoundError(f"File not found: {syn_path}")
 
     syn_content = syn_path.read_text(encoding="utf-8")
 
     resolved_project = _resolve_project(syn_path, project_path)
     if resolved_project is None:
         raise FileNotFoundError(
-            f"Projeto .synp não encontrado próximo a {syn_path}. "
-            "Use --project para especificá-lo."
+            f".synp project not found near {syn_path}. "
+            "Use --project to set it."
         )
     ctx = load_project(resolved_project, load_annotations=True)
     _colisoes = reserved_field_collisions(ctx.get("item_fields") or {})
     if _colisoes:
         _log.warning(
-            "Campo(s) do template com nome de tag reservada da revisão: %s. "
-            "`# $<nome>:` é lido como diagnóstico, não como correção desses campos.",
+            "Template field(s) named like a reserved review tag: %s. "
+            "`# $<name>:` is read as a diagnostic, not as a correction of those fields.",
             ", ".join(_colisoes),
         )
 
@@ -498,7 +498,7 @@ async def _process_refine_async(
 
     items_improved = sum(1 for r in results if r.improved)
     _log.info(
-        "Refine concluído: %d/%d ITEMs melhorados", items_improved, total_items,
+        "Refine finished: %d/%d ITEMs improved", items_improved, total_items,
     )
 
     # Reconstruir o .syn com os blocos refinados + cabeçalho de métricas.
@@ -522,23 +522,23 @@ async def _process_refine_async(
     total_out = critique_client.usage.output_tokens + refine_client.usage.output_tokens
 
     summary = (
-        f"Refine concluído em {elapsed:.1f}s\n"
-        f"  Origem:    {syn_path.name}\n"
-        f"  Saída:     {output_path}\n"
-        f"  ITEMs:     {total_items} total | {items_improved} melhorados\n"
-        f"  Crítico:   {critique_client.model}\n"
-        f"  Gerador:   {refine_client.model}\n"
-        f"  Iterações: max {max_iter} | limiar {suspicion_threshold}\n"
+        f"Refine finished in {elapsed:.1f}s\n"
+        f"  Input:      {syn_path.name}\n"
+        f"  Output:     {output_path}\n"
+        f"  ITEMs:      {total_items} total | {items_improved} improved\n"
+        f"  Critic:     {critique_client.model}\n"
+        f"  Generator:  {refine_client.model}\n"
+        f"  Iterations: max {max_iter} | threshold {suspicion_threshold}\n"
         f"  tokens: in {total_in} | out {total_out} | calls {total_calls}"
     )
 
     if format == "verbose":
         header = (
             f"# synesis-coder refine\n"
-            f"# origem: {syn_path.name}\n"
-            f"# saída: {output_path.name}\n"
-            f"# ITEMs: {total_items} | melhorados: {items_improved}\n"
-            f"# crítico: {critique_client.model} | gerador: {refine_client.model}\n"
+            f"# input: {syn_path.name}\n"
+            f"# output: {output_path.name}\n"
+            f"# ITEMs: {total_items} | improved: {items_improved}\n"
+            f"# critic: {critique_client.model} | generator: {refine_client.model}\n"
         )
         return header + "\n" + summary
 

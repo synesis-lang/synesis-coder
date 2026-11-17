@@ -75,7 +75,7 @@ class AnthropicCaps:
     off_max_effort: Optional[str] = None
     effort: bool = False
     max_output: Optional[int] = None
-    source: str = "padrão"
+    source: str = "default"
 
 
 def _caps(**kw) -> AnthropicCaps:
@@ -164,7 +164,7 @@ def _models_api_capabilities(client, model: str) -> Optional[dict]:
             if isinstance(data.get("max_tokens"), int):
                 caps["_max_tokens"] = data["max_tokens"]
     except Exception as exc:  # noqa: BLE001 — metadado opcional
-        _log.debug("Models API indisponível para %s (%s); usando a tabela", model, exc)
+        _log.debug("Models API unavailable for %s (%s); using the table", model, exc)
     with _api_lock:
         _api_cache[model] = caps
     return caps
@@ -225,7 +225,7 @@ def requested_effort() -> Optional[str]:
     if not v:
         return None
     if v not in EFFORTS:
-        warn_once("*", f"SYNESIS_CODER_EFFORT={v!r} ignorado (use {', '.join(EFFORTS)})")
+        warn_once("*", f"SYNESIS_CODER_EFFORT={v!r} ignored (use {', '.join(EFFORTS)})")
         return None
     return v
 
@@ -282,7 +282,7 @@ def plan_request(
     reserve = thinking_reserve() if reserve is None else reserve
     if effort and not caps.effort:
         warn_once(
-            model, f"SYNESIS_CODER_EFFORT={effort} ignorado: o modelo '{model}' não aceita esforço."
+            model, f"SYNESIS_CODER_EFFORT={effort} ignored: the model '{model}' does not accept effort."
         )
         effort = None
 
@@ -292,23 +292,23 @@ def plan_request(
         if "enabled" in caps.thinking_types and budget > 0:
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             out_tokens = max(max_tokens, budget + 4096)
-            label = f"extended thinking (orçamento {budget})"
+            label = f"extended thinking (budget {budget})"
         elif "adaptive" in caps.thinking_types:
             params["thinking"] = {"type": "adaptive"}
             out_tokens = max_tokens + reserve
-            label = "raciocínio adaptativo"
+            label = "adaptive reasoning"
             if budget > 0:
                 warn_once(
                     model,
-                    f"SYNESIS_CODER_THINKING_BUDGET={budget}: o modelo '{model}' não aceita "
-                    "orçamento (extended thinking); usando raciocínio adaptativo. "
-                    "O esforço (SYNESIS_CODER_EFFORT) é o controle de profundidade.",
+                    f"SYNESIS_CODER_THINKING_BUDGET={budget}: the model '{model}' does not accept "
+                    "a budget (extended thinking); using adaptive reasoning. "
+                    "Effort (SYNESIS_CODER_EFFORT) is the depth control.",
                 )
         else:
             warn_once(
                 model,
-                f"SYNESIS_CODER_THINKING_BUDGET={budget} ignorado: modelo '{model}' "
-                "não suporta raciocínio pelo coder.",
+                f"SYNESIS_CODER_THINKING_BUDGET={budget} ignored: model '{model}' "
+                "does not support reasoning through the coder.",
             )
             label = ""
         thinks = "thinking" in params
@@ -320,20 +320,20 @@ def plan_request(
         )
         if caps.off_type and effort_ok:
             params["thinking"] = {"type": caps.off_type}
-            label = f"raciocínio desativado ({caps.off_type})"
+            label = f"reasoning off ({caps.off_type})"
         else:
             # Não desliga: o raciocínio roda e recebe reserva de saída.
             thinks = True
             out_tokens = max_tokens + reserve
             if caps.off_type and not effort_ok:
-                label = f"raciocínio adaptativo (não desliga com esforço {effort})"
+                label = f"adaptive reasoning (does not turn off at effort {effort})"
             else:
-                label = "raciocínio adaptativo (não desliga neste modelo)"
+                label = "adaptive reasoning (does not turn off on this model)"
             warn_once(
                 model,
-                f"O modelo '{model}' raciocina por padrão e o pedido de desligar não "
-                f"é aceito ({label}). Reserva de {reserve} tokens somada ao max_tokens; "
-                "os tokens de raciocínio são cobrados como saída.",
+                f"The model '{model}' reasons by default and the request to turn it off is not "
+                f"accepted ({label}). A reserve of {reserve} tokens is added to max_tokens; "
+                "reasoning tokens are billed as output.",
             )
     else:
         label = ""

@@ -66,7 +66,7 @@ def _build_messages(
     from synesis_coder import prompt_builder as pb
 
     ref = bibref or "BIBREF"
-    body = text if text is not None else "<<texto da unidade de entrada>>"
+    body = text if text is not None else "<<text of the input unit>>"
 
     if mode == "item":
         if path == "json":
@@ -96,7 +96,7 @@ def _build_messages(
             return pb.build_ontology_values_prompt(ctx, code, semantic_ctx)
         return pb.build_ontology_prompt(ctx, code, semantic_ctx)
 
-    raise ValueError(f"Modo sem dump de prompt: {mode!r}")
+    raise ValueError(f"Mode without a prompt dump: {mode!r}")
 
 
 def _ontology_semantic_ctx(ctx: dict, code: str) -> dict:
@@ -163,15 +163,15 @@ def dump_prompt(
     lines: List[str] = [
         f"# Prompt — {project_path.stem} / {mode}",
         "",
-        f"projeto: `{project_path.name}` · caminho: {path_label}",
+        f"project: `{project_path.name}` · path: {path_label}",
     ]
     if bibref:
         lines.append(f"bibref: `@{bibref}`")
     if mode == "ontology":
         lines.append(
-            f"conceito: `{text}` · evidência do corpus: a mesma da execução"
+            f"concept: `{text}` · corpus evidence: the same as in the run"
             if text else
-            "evidência do corpus: OMITIDA (nenhum conceito anotado no projeto)"
+            "corpus evidence: OMITTED (no concept annotated in the project)"
         )
     lines.append("")
 
@@ -179,7 +179,7 @@ def dump_prompt(
         content = msg["content"]
         fence = _fence_for(content)
         heading = msg["role"].upper()
-        cache_note = " (cacheável)" if msg.get("cache") else ""
+        cache_note = " (cacheable)" if msg.get("cache") else ""
         lines.extend([
             f"## {heading}{cache_note}",
             "",

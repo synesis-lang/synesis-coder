@@ -255,7 +255,7 @@ class TestMetricsHeader:
         header = _build_metrics_header(
             results, Path("corpus.syn"), "critic-m", "gen-m", 2, 0.20,
         )
-        assert "# --- Fase R: Refine" in header
+        assert "# --- Stage R: Refine" in header
         assert "metrics.refine.items_total: 1" in header
         assert "metrics.refine.items_improved: 1" in header
         assert "metrics.refine.critique_model: critic-m" in header
@@ -384,7 +384,7 @@ class TestProcessRefine:
 
         assert len(instantiated) == 2  # crítico + gerador
         assert (tmp_path / "corpus_refined.syn").exists()
-        assert "Refine concluído" in out
+        assert "Refine finished" in out
 
     def test_output_contains_metrics_header(self, tmp_path):
         """O .syn de saída traz o cabeçalho metrics.refine.*."""
@@ -463,4 +463,4 @@ class TestCliRefine:
             "--output", str(syn_file),
         ])
         assert result.exit_code == 1
-        assert "arquivo de entrada" in result.output
+        assert "points to the input file" in result.output

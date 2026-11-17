@@ -18,9 +18,17 @@ _log = logging.getLogger(__name__)
 logging.addLevelName(21, "OK")
 logging.addLevelName(22, "DEST")
 
+from dotenv import find_dotenv as _find_dotenv
 from dotenv import load_dotenv as _load_dotenv
 
-_load_dotenv()
+# Precedência: variável de ambiente > .env do projeto > .env do coder.
+# O .env do projeto é procurado a partir da pasta onde o comando roda
+# (usecwd=True); sem isso, o python-dotenv sobe a partir do PACOTE e o .env do
+# pesquisador nunca era lido. É ali que o projeto declara, por exemplo,
+# SYNESIS_CODER_LANGUAGE (Social Acceptance em inglês, face85 em português).
+_project_env = _find_dotenv(usecwd=True)
+if _project_env:
+    _load_dotenv(_project_env, override=False)
 _load_dotenv(Path(__file__).parent.parent / ".env", override=False)
 
 if hasattr(sys.stdout, "buffer") and sys.stdout.encoding.lower() != "utf-8":
@@ -75,12 +83,12 @@ def get_concurrent(default: int, flag: int | None = None) -> int:
         value = int(raw)
     except ValueError:
         _log.warning(
-            "SYNESIS_CODER_CONCURRENT=%r não é inteiro — usando %d.", raw, default
+            "SYNESIS_CODER_CONCURRENT=%r is not an integer — using %d.", raw, default
         )
         return default
     if value < 1:
         _log.warning(
-            "SYNESIS_CODER_CONCURRENT=%d é inválido (mínimo 1) — usando %d.",
+            "SYNESIS_CODER_CONCURRENT=%d is invalid (minimum 1) — using %d.",
             value, default,
         )
         return default
@@ -101,10 +109,10 @@ def _validate_phase_env(phase_name: str) -> str:
     backend = os.environ.get("SYNESIS_CODER_BACKEND", "anthropic").lower()
     if backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         raise EnvironmentError(
-            f"ANTHROPIC_API_KEY não encontrada.\n"
-            f"Configure no seu .env:\n\n"
+            f"ANTHROPIC_API_KEY not found.\n"
+            f"Set it in your .env:\n\n"
             f"  ANTHROPIC_API_KEY=sk-ant-...\n\n"
-            f"Para usar um modelo específico na fase '{phase_name}', adicione também:\n\n"
+            f"To use a specific model in the '{phase_name}' stage, also add:\n\n"
             f"  {phase_model_var}=claude-sonnet-4-6"
         )
     return model
@@ -221,9 +229,13 @@ def _build_main_help() -> str:
             ("dataset",     "Annotates a TOML dataset — SOURCE + ITEMs per record"),
             ("item",        "Annotates a single excerpt, given its bibref"),
         ]),
-        ("Building the ontology", [
-            ("ontology",    "Generates ONTOLOGY entries (.syno) from the annotated corpus"),
-            ("suggest",     "Suggests codes from the project vocabulary for an excerpt"),
+        ("Building the knowledge model", [
+            ("ontology",    "Generates model entries (.syno) from the annotated corpus"),
+            ("phase",       "Runs a PHASE: fills one declared group of template fields\n"
+                            "(ontology phases: descriptive, taxonomy, synonyms)"),
+            ("review",      "Samples a phase's applied proposals for judgement; scores the sample"),
+            ("consolidate", "Merges a duplicate model entry into the one that remains (ROLE USE); reversible"),
+            ("suggest",     "Suggests codes already used in the project for an excerpt"),
         ]),
         ("Reviewing annotations (ACT pipeline)", [
             ("critique",    "[1] Reviews a .syn and emits .synr with # REVISION blocks"),
@@ -260,7 +272,10 @@ def _build_main_help() -> str:
     def _render_group(label: str, rows: list[tuple[str, str]]) -> str:
         lines = [_c("  " + label, fg="yellow", bold=True)]
         for name, desc_ in rows:
-            lines.append(f"    {_c(name.ljust(col), fg='green', bold=True)}  {desc_}")
+            first, *more = desc_.split("\n")
+            lines.append(f"    {_c(name.ljust(col), fg='green', bold=True)}  {first}")
+            # Continuacao da descricao: alinhada sob a primeira linha.
+            lines.extend(f"    {' ' * col}  {extra}" for extra in more)
         return "\n".join(lines)
 
     commands = _c("Commands:", fg="yellow", bold=True) + "\n\n" + "\n\n".join(
@@ -311,7 +326,7 @@ def _ex(*lines: str) -> str:
                     result.append(_c(tok, fg="green", bold=True))
                 elif re.match(r"^--[\w-]+=?", tok):
                     result.append(_c(tok, fg="cyan"))
-                elif tok in ("item", "abstract", "document", "dataset", "ontology",
+                elif tok in ("item", "abstract", "document", "dataset", "ontology", "phase", "review", "consolidate",
                              "suggest", "finetune", "critique", "normalize",
                              "incorporate", "refine"):
                     result.append(_c(tok, fg="green"))
@@ -429,6 +444,32 @@ _EPILOG_FINETUNE = _ex(
     "",
     "  # Multiple enrichment types:",
     "  synesis-coder finetune --input raw.jsonl --output rich.jsonl --enrich vary --enrich didactic --enrich counterfactual",
+)
+
+_EPILOG_PHASE = _ex(
+    "",
+    "  # List the project's phases, their fields, destination and connection:",
+    "  synesis-coder phase project.synp --list",
+    "",
+    "  # Run a descriptive phase (fills only empty fields of its FIELDS):",
+    "  synesis-coder phase project.synp definicoes",
+    "",
+    "  # Show the proposed diff without writing:",
+    "  synesis-coder phase project.synp definicoes --dry-run",
+    "",
+    "  # Write to another local .syno of the project (pending concepts there):",
+    "  synesis-coder phase project.synp definicoes --output outro.syno",
+    "",
+    "  # Per-phase model and connection (.env), falling back to the global ones:",
+    "  SYNESIS_CODER_PHASE_DEFINICOES_MODEL=claude-sonnet-5-5",
+    "  SYNESIS_CODER_PHASE_DEFINICOES_BACKEND=anthropic",
+    "",
+    "  # Taxonomy phase (HIERARCHY fields), work divided by a field, one generation of new parents:",
+    "  synesis-coder phase project.synp taxonomia --group-by aspecto --new-generations 1",
+    "",
+    "  # Evaluate by sampling (stratified, weights by inclusion probability):",
+    "  synesis-coder review project.synp taxonomy --unit edge --sample 100 --stratify depth",
+    "",
 )
 
 _EPILOG_CRITIQUE = _ex(
@@ -581,9 +622,9 @@ def item(project, bibref, text, output_format, model, thinking_budget,
         else:
             click.echo(result)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_ABSTRACT)
@@ -671,11 +712,11 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
         else:
             click.echo(result)
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_DATASET)
@@ -719,9 +760,9 @@ def dataset(project, output_dir, concurrent, single_file, dataset_glob, model, l
             per_record=not single_file, model=model, dataset_glob=dataset_glob,
         ))
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_DOCUMENT)
@@ -792,11 +833,11 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
         else:
             click.echo(result)
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_ONTOLOGY)
@@ -828,7 +869,7 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
 def ontology(project, output_path, update, concurrent, output_format, model,
              thinking_budget, language, max_tokens, temperature, overwrite, backup,
              prompt_only):
-    """Generate ONTOLOGY entries (.syno) from the project's annotated corpus."""
+    """Generate model entries (ONTOLOGY blocks, .syno) from the annotated corpus."""
     concurrent = get_concurrent(5, concurrent)
     from synesis_coder.modes.ontology_mode import process_ontology
 
@@ -855,11 +896,125 @@ def ontology(project, output_path, update, concurrent, output_format, model,
         else:
             click.echo(result)
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
+
+
+@main.command(epilog=_EPILOG_PHASE)
+@click.argument("project", type=click.Path(exists=True, path_type=Path))
+@click.argument("phase_name", required=False)
+@click.option("--list", "list_only", is_flag=True, default=False,
+              help="List the PHASE blocks of the project and exit.")
+@click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
+              help="Destination .syno for this run (overrides the phase OUTPUT).")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Generate and validate, show the diff, write nothing.")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Rewrite the phase fields even when already filled.")
+@click.option("--retry-rejected", "retry_rejected", is_flag=True, default=False,
+              help="Retry proposals rejected before with the same inputs.")
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
+              help="Maximum number of simultaneous LLM calls.")
+@click.option("--model", default=None,
+              help="LLM model ID (overrides SYNESIS_CODER_PHASE_<NAME>_MODEL).")
+@click.option("--backup", is_flag=True, default=False,
+              help="Create a .bak copy of the destination before writing.")
+@click.option("--group-by", "group_by", default=None,
+              help="Taxonomy: ONTOLOGY field that divides the work (default: the TOPIC field).")
+@click.option("--group-size", "group_size", default=None, type=click.IntRange(min=2),
+              help="Taxonomy: maximum concepts per call (default 60).")
+@click.option("--new-generations", "new_generations", default=None, type=click.IntRange(min=0),
+              help="Taxonomy: generations of NEW concepts (default 1; 0 disables creation).")
+@click.option("--within-topic", "within_topic", is_flag=True, default=False,
+              help="Taxonomy policy: a new parent only groups children of the same topic.")
+@click.option("--min-children", "min_children", default=None, type=click.IntRange(min=1),
+              help="Taxonomy policy: minimum children for a new parent.")
+@click.option("--max-new", "max_new", default=None, type=click.IntRange(min=0),
+              help="Taxonomy policy: maximum new parents in this run.")
+@click.option("--max-calls", "max_calls", default=None, type=click.IntRange(min=1),
+              help="Budget: maximum model calls in this run (taxonomy default 60).")
+@click.option("--hide-relations", "hide_relations", default=None,
+              help="Taxonomy: CHAIN relations kept out of the prompt (e.g. the gold standard: TIPO_DE,PARTE_DE).")
+def phase(project, phase_name, list_only, output_path, dry_run, overwrite, retry_rejected,
+          concurrent, model, backup, group_by, group_size, new_generations, within_topic,
+          min_children, max_new, max_calls, hide_relations):
+    """Run a PHASE declared in the .synp: fill its group of template fields (ontology phases)."""
+    from synesis_coder.manifest import ManifestConflict
+    from synesis_coder.modes.phase_mode import list_phases, run_phase
+
+    try:
+        if list_only:
+            click.echo(list_phases(project), nl=False)
+            return
+        if not phase_name:
+            raise click.UsageError("Missing PHASE_NAME (or use --list).")
+        report = run_phase(
+            project, phase_name, output_path=output_path, dry_run=dry_run,
+            overwrite=overwrite, retry_rejected=retry_rejected,
+            concurrent=get_concurrent(5, concurrent), model=model, backup=backup,
+            options={"group_by": group_by, "group_size": group_size,
+                     "new_generations": new_generations, "within_topic": within_topic,
+                     "min_children": min_children, "max_new": max_new, "max_calls": max_calls,
+                     "hide_relations": hide_relations},
+        )
+        click.echo(report, nl=False)
+    except click.UsageError:
+        raise
+    except ManifestConflict as exc:
+        click.echo(f"Conflito: {exc}", err=True); sys.exit(2)
+    except (FileNotFoundError, ValueError, EnvironmentError, RuntimeError) as exc:
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
+
+
+@main.command()
+@click.argument("project", type=click.Path(exists=True, path_type=Path))
+@click.argument("alias")
+@click.option("--into", "target", default=None, help="Concept that remains (the alias points to it).")
+@click.option("--revert", is_flag=True, default=False, help="Undo the consolidation of ALIAS (from the manifest).")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Validate and report; write nothing.")
+@click.option("--backup", is_flag=True, default=False, help="Create a .bak copy of the .syno before writing.")
+def consolidate(project, alias, target, revert, dry_run, backup):
+    """Merge a duplicate model entry into the one that remains (ROLE USE); reversible."""
+    from synesis_coder.manifest import ManifestConflict
+    from synesis_coder.modes.consolidate_mode import consolidate as run
+
+    try:
+        click.echo(run(project, alias, target, revert=revert, dry_run=dry_run, backup=backup), nl=False)
+    except ManifestConflict as exc:
+        click.echo(f"Conflito: {exc}", err=True); sys.exit(2)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
+
+
+@main.command()
+@click.argument("project", type=click.Path(exists=True, path_type=Path))
+@click.argument("phase_name")
+@click.option("--unit", type=click.Choice(["edge", "label", "concept"]), default="edge",
+              show_default=True, help="Sampling unit.")
+@click.option("--sample", "size", default=100, show_default=True, type=click.IntRange(min=1),
+              help="Sample size.")
+@click.option("--stratify", type=click.Choice(["depth", "topic", "origin", "none"]),
+              default="depth", show_default=True, help="Strata of the sample.")
+@click.option("--seed", default=1, show_default=True, type=int, help="Random seed (reproducible sample).")
+@click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
+              help="Destination .syno of the phase run (default: the phase OUTPUT).")
+@click.option("--score", "score_path", default=None, type=click.Path(exists=True, path_type=Path),
+              help="Score a judged sample CSV instead of drawing a new one.")
+def review(project, phase_name, unit, size, stratify, seed, output_path, score_path):
+    """Sample the applied proposals of a phase for judgement, or score a judged sample."""
+    from synesis_coder.modes import review_mode
+
+    try:
+        if score_path is not None:
+            click.echo(review_mode.score(score_path), nl=False)
+        else:
+            click.echo(review_mode.sample(project, phase_name, unit=unit, size=size,
+                                          stratify=stratify, seed=seed, output=output_path), nl=False)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_CRITIQUE)
@@ -903,9 +1058,9 @@ def critique(syn_file, project_path, output_path, concurrent, sensitivity,
                                     model=resolved_model, suspicion_threshold=suspicion_threshold,
                                     format=output_format, debug=debug_mode))
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 _EPILOG_ANCHOR = _ex(
@@ -950,7 +1105,7 @@ def anchor(syn_file, project_path, field, strict):
         resolved = _resolve_project(Path(syn_file), project_path)
         if resolved is None:
             click.echo(
-                "Erro: projeto .synp não encontrado. Use --project.", err=True
+                "Error: .synp project not found. Use --project.", err=True
             )
             sys.exit(1)
 
@@ -959,7 +1114,7 @@ def anchor(syn_file, project_path, field, strict):
         bib_content = ctx.get("bib_content") or ""
         if not bib_content:
             click.echo(
-                "Erro: projeto sem bibliografia — não há fonte para ancorar.",
+                "Error: project without a bibliography — there is no source to anchor against.",
                 err=True,
             )
             sys.exit(1)
@@ -975,9 +1130,9 @@ def anchor(syn_file, project_path, field, strict):
         if issues and strict:
             sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_NORMALIZE)
@@ -1016,9 +1171,9 @@ def normalize(synr_files, project_path, output_dir, concurrent, confidence_thres
                                      confidence_threshold=confidence_threshold,
                                      inventory_path=inventory_path, format=output_format))
     except (FileNotFoundError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_INCORPORATE)
@@ -1043,11 +1198,11 @@ def incorporate(synr_file, project_path, output_path, output_format, overwrite, 
                                        output_path=output_path, format=output_format,
                                        overwrite=overwrite, backup=backup))
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_REFINE)
@@ -1103,8 +1258,8 @@ def refine(syn_file, project_path, output_path, concurrent, max_iter,
             resolved_out = Path(output_path).resolve()
             if resolved_out == Path(syn_file).resolve() and not overwrite:
                 click.echo(
-                    "Erro: --output aponta para o arquivo de entrada. "
-                    "Escolha outro caminho ou use --overwrite --backup explicitamente.",
+                    "Error: --output points to the input file. "
+                    "Choose another path or use --overwrite --backup explicitly.",
                     err=True,
                 )
                 sys.exit(1)
@@ -1117,11 +1272,11 @@ def refine(syn_file, project_path, output_path, concurrent, max_iter,
             format=output_format, overwrite=overwrite, backup=backup, debug=debug_mode,
         ))
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_FINETUNE)
@@ -1160,11 +1315,11 @@ def finetune(project_path, input_path, output_path, enrich, concurrent,
                                     format=output_format, overwrite=overwrite,
                                     backup=backup))
     except FileExistsError as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)
 
 
 @main.command(epilog=_EPILOG_SUGGEST)
@@ -1177,13 +1332,13 @@ def finetune(project_path, input_path, output_path, enrich, concurrent,
               help="plain: suggestions only; verbose: includes metadata.")
 @click.option("--model", default=None, help="LLM model ID (overrides SYNESIS_CODER_MODEL).")
 def suggest(project, text, output_format, model):
-    """Suggest relevant Synesis codes for a text excerpt."""
+    """Suggest codes already used in the project for a text excerpt."""
     from synesis_coder.modes.suggest_mode import process_suggest
 
     try:
         click.echo(process_suggest(project_path=project, text=text,
                                    format=output_format, model=model))
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
-        click.echo(f"Erro: {exc}", err=True); sys.exit(1)
+        click.echo(f"Error: {exc}", err=True); sys.exit(1)
     except Exception as exc:
-        click.echo(f"Erro inesperado: {exc}", err=True); sys.exit(1)
+        click.echo(f"Unexpected error: {exc}", err=True); sys.exit(1)

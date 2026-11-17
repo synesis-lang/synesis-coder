@@ -102,7 +102,7 @@ class TestResolveSensitivity:
         assert threshold == 0.42 and label == "0.42"
 
     def test_invalid_raises(self):
-        with pytest.raises(ValueError, match="Sensibilidade inválida"):
+        with pytest.raises(ValueError, match="Invalid sensitivity"):
             resolve_sensitivity("very-strict")
 
 

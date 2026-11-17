@@ -633,7 +633,7 @@ class TestBuildSourceContext:
         ctx = self._ctx(title="Um {Título}", keywords="phishing, fraude", abstract=abstract)
         text, origin = _build_source_context(ctx, "silva2024", self.DOC)
 
-        assert origin == "abstract do .bib"
+        assert origin == "abstract from the .bib"
         assert text.startswith("Title: Um Título\nKeywords: phishing, fraude\nAbstract: ")
         assert abstract.strip() in text  # abstract inteiro, sem corte em 500
         assert "Introdução" not in text
@@ -643,7 +643,7 @@ class TestBuildSourceContext:
 
         ctx = self._ctx(abstract="Resumo.")
         _, origin = _build_source_context(ctx, "@Silva2024", self.DOC)
-        assert origin == "abstract do .bib"
+        assert origin == "abstract from the .bib"
 
     def test_optional_title_and_keywords(self):
         from synesis_coder.modes.document_mode import _build_source_context
@@ -659,7 +659,7 @@ class TestBuildSourceContext:
 
         for ctx in (self._ctx(title="Só título"), self._ctx(abstract="  "), {}):
             text, origin = _build_source_context(ctx, "silva2024", self.DOC)
-            assert origin == "início do documento"
+            assert origin == "start of the document"
             assert text == self.DOC[:SOURCE_EXCERPT_CHARS].strip()
 
     def test_source_prompt_does_not_truncate_context(self):
@@ -710,7 +710,7 @@ class TestReadDocument:
         with tempfile.TemporaryDirectory() as tmpdir:
             empty = Path(tmpdir) / "empty.txt"
             empty.write_text("", encoding="utf-8")
-            with pytest.raises(ValueError, match="vazio"):
+            with pytest.raises(ValueError, match="is empty"):
                 read_document(empty)
 
 

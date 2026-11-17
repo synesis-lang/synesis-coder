@@ -436,11 +436,14 @@ def normalize_indentation(text: str) -> str:
     - Linhas fora de blocos (comentários de cabeçalho, `# ERRO`) ficam intactas.
     - Linhas vazias são preservadas.
 
-    Note que continuações multi-linha de um valor também são normalizadas para
-    um nível — o parser é orientado a linha e não distingue níveis internos.
+    - A profundidade RELATIVA ao primeiro campo do bloco é preservada: uma
+      continuação mais recuada que o campo (o valor de `exemplos:` nas linhas
+      seguintes) continua mais recuada. Achatá-la num nível só quebrava o parse
+      de todo campo de várias linhas (achado na mesclagem por bloco, A0a).
     """
     out: List[str] = []
     inside = False
+    base: Optional[int] = None  # indentação do primeiro campo do bloco atual
 
     for line in text.splitlines():
         if not line.strip():
@@ -455,8 +458,15 @@ def normalize_indentation(text: str) -> str:
         if _BLOCK_START.match(line):
             out.append(line.strip())
             inside = True
+            base = None
             continue
 
-        out.append(_INDENT + line.strip() if inside else line)
+        if not inside:
+            out.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        if base is None:
+            base = indent
+        out.append(_INDENT + " " * max(0, indent - base) + line.strip())
 
     return "\n".join(out)

@@ -66,17 +66,17 @@ def parse_dataset_records(ctx: dict) -> List[Dict[str, str]]:
     dataset_index: Optional[Dict[str, Any]] = ctx.get("dataset_index")
     if not dataset_index:
         raise ValueError(
-            "Nenhum dataset carregado. Verifique se o .synp declara "
-            'INCLUDE DATASET "<glob>.toml" e se o template tem ao menos um '
-            "campo REQUIRED/OPTIONAL ... ON DATASET (a chave de indexação é "
-            "descoberta do campo IDENTIFIES com ON DATASET)."
+            "No dataset loaded. Check that the .synp declares "
+            'INCLUDE DATASET "<glob>.toml" and that the template has at least one '
+            "REQUIRED/OPTIONAL ... ON DATASET field (the indexing key is "
+            "found from the IDENTIFIES field with ON DATASET)."
         )
 
     entries: List[Dict[str, str]] = [
         {"bibref": key, "text": _serialize_record(ctx, record)}
         for key, record in dataset_index.items()
     ]
-    logger.info("Carregados %d registro(s) do dataset", len(entries))
+    logger.info("Loaded %d dataset record(s)", len(entries))
     return entries
 
 
@@ -230,17 +230,17 @@ async def _process_dataset_async(
             dataset_glob_override=dataset_glob,
         )
         logger.info(
-            "Lista de conceitos existentes: %d conceito(s) das anotações do projeto.",
+            "List of existing concepts: %d concept(s) from the project annotations.",
             len(ctx["code_index"].get("codes", [])),
         )
     entries = parse_dataset_records(ctx)
     if not entries:
-        return "Nenhum registro no dataset — nada a processar."
+        return "No record in the dataset — nothing to process."
 
     output_dir = Path(output_dir).resolve()
     if output_dir.exists() and not output_dir.is_dir():
         raise ValueError(
-            f"'{output_dir}' existe como arquivo; --output-dir espera uma pasta."
+            f"'{output_dir}' exists as a file; --output-dir expects a folder."
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,7 +252,7 @@ async def _process_dataset_async(
     # A concorrência já aparece no banner de motor; BatchProgress.start()
     # anuncia o início. Uma terceira linha aqui seria redundante.
     start_time = time.monotonic()
-    progress = BatchProgress(len(entries), unit="reg", usage=llm_client.usage)
+    progress = BatchProgress(len(entries), unit="rec", usage=llm_client.usage)
     progress.start()
 
     async def _one(index: int, entry: Dict[str, str]) -> Tuple[str, bool]:
@@ -262,9 +262,9 @@ async def _process_dataset_async(
             try:
                 raw = await _generate_abstract_syn(ctx, bibref, text, llm_client, context)
             except Exception as exc:  # noqa: BLE001
-                logger.error("Falha na chamada LLM para %s: %s", bibref, exc)
-                _write_syn(output_dir, bibref, f"# ERRO: LLM falhou para @{bibref}\n# {exc}\n", per_record)
-                logger.info("[%d/%d] %s — ERRO: %s", index + 1, len(entries), bibref, exc)
+                logger.error("LLM call failed for %s: %s", bibref, exc)
+                _write_syn(output_dir, bibref, f"# ERROR: LLM failed for @{bibref}\n# {exc}\n", per_record)
+                logger.info("[%d/%d] %s — ERROR: %s", index + 1, len(entries), bibref, exc)
                 return bibref, False
             # Rede de segurança §11.3: remove campos ON DATASET/BIBLIOGRAPHY que o
             # caminho texto-livre possa ter alucinado (o caminho JSON já exclui).
@@ -284,8 +284,8 @@ async def _process_dataset_async(
             final, dupes = dedupe_item_blocks(final)
             if dupes:
                 logger.warning(
-                    "%s: %d bloco(s) ITEM duplicado(s) removido(s) — possível "
-                    "loop degenerativo do modelo.", bibref, dupes,
+                    "%s: %d duplicate ITEM block(s) removed — possible "
+                    "degenerate model loop.", bibref, dupes,
                 )
 
             # Identidade: o registro precisa manter a própria chave. Outra chave
@@ -294,12 +294,12 @@ async def _process_dataset_async(
             if foreign:
                 ok = False
                 logger.error(
-                    "%s: a saída usa outra(s) chave(s) (%s) — registro rejeitado.",
+                    "%s: the output uses other key(s) (%s) — record rejected.",
                     bibref, ", ".join(sorted(foreign)),
                 )
                 final = (
-                    f"# ERRO: a saída usa a(s) chave(s) {', '.join('@' + k for k in sorted(foreign))}"
-                    f" no lugar de @{bibref}; o texto seria atribuído a outro registro.\n"
+                    f"# ERROR: the output uses the key(s) {', '.join('@' + k for k in sorted(foreign))}"
+                    f" instead of @{bibref}; the text would be attributed to another record.\n"
                     + final
                 )
 
@@ -309,8 +309,8 @@ async def _process_dataset_async(
             if ok and n_items == 0:
                 ok = False
                 logger.error(
-                    "%s: nenhum bloco ITEM gerado — o registro não produziu "
-                    "anotação alguma (o .syn contém apenas SOURCE).", bibref,
+                    "%s: no ITEM block generated — the record produced "
+                    "no annotation at all (the .syn has only SOURCE).", bibref,
                 )
 
             _write_syn(output_dir, bibref, final, per_record)
@@ -319,7 +319,7 @@ async def _process_dataset_async(
             # conta conclusões, que é o que o pesquisador acompanha.
             status = (
                 "OK" if ok
-                else ("SEM ITEMs" if n_items == 0 else "FALHA NA VALIDAÇÃO")
+                else ("NO ITEMs" if n_items == 0 else "VALIDATION FAILED")
             )
             progress.mark(success=ok, detail=f"{bibref} — {status}")
             return bibref, ok
@@ -337,7 +337,7 @@ async def _process_dataset_async(
         elapsed=elapsed,
         output=str(output_dir),
         llm_client=llm_client,
-        unit="registros",
+        unit="records",
     )
     # Sumário é o valor de RETORNO do modo; a CLI o imprime. Logar duplicaria.
     return summary

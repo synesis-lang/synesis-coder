@@ -69,9 +69,9 @@ def warn_template_issues(template_name: str, template_content: str, field_specs:
         return
     details = "\n".join(f"  - {name}: {line}" for name, line in altered)
     logger.warning(
-        "%s: %d linha(s) de GUIDELINES chegam ao modelo diferentes do que está "
-        "escrito no template (o compilador anterior ao synesis 0.13.3 altera a "
-        "palavra-chave no início da linha e listas numeradas). Atualize o synesis "
-        "ou reescreva a linha sem começar por palavra-chave nem por '1.':\n%s",
+        "%s: %d GUIDELINES line(s) reach the model differently from what is "
+        "written in the template (the compiler before synesis 0.13.3 changes the "
+        "keyword at the start of the line and numbered lists). Upgrade synesis "
+        "or rewrite the line without starting with a keyword or with '1.':\n%s",
         template_name, len(altered), details,
     )

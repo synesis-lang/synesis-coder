@@ -91,11 +91,11 @@ def process_item(
         return final_syn
 
     # verbose: inclui status
-    status_line = "# OK" if success else "# AVISO: validação não concluída com sucesso"
+    status_line = "# OK" if success else "# WARNING: validation did not finish successfully"
     project_name = ctx["project_path"].stem
     header = (
         f"# synesis-coder item\n"
-        f"# projeto: {project_name}\n"
+        f"# project: {project_name}\n"
         f"# bibref: @{bibref}\n"
         f"# {client.usage.summary_line()}\n"
         f"{status_line}\n"

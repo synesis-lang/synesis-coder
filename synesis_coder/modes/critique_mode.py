@@ -374,7 +374,7 @@ def _parse_critique_response(raw: str) -> dict[str, str]:
         normalized, was_valid = validate_reason(tags["reason"])
         if not was_valid:
             _log.warning(
-                "reason inválido descartado: %r — categorias válidas: %s",
+                "invalid reason discarded: %r — valid categories: %s",
                 tags["reason"],
                 ", ".join(sorted(VALID_REASONS)),
             )
@@ -442,8 +442,8 @@ async def _critique_tags(
         source_text, anchored = _build_critique_source(item_block, bibref, ctx)
         if not anchored:
             _log.info(
-                "ITEM @%s: trecho não localizado no abstract — critique recebe o "
-                "abstract inteiro (ancoragem falhou)",
+                "ITEM @%s: excerpt not found in the abstract — critique receives the "
+                "whole abstract (anchoring failed)",
                 bibref,
             )
     messages = build_critique_prompt(
@@ -453,7 +453,7 @@ async def _critique_tags(
     try:
         raw = await llm_client.call_async(messages, temperature=0.0, thinking=False)
     except Exception as exc:
-        _log.error("Falha na chamada LLM para ITEM @%s: %s", bibref, exc)
+        _log.error("LLM call failed for ITEM @%s: %s", bibref, exc)
         return None
 
     _log.debug("ITEM @%s raw response:\n%s", bibref, raw)
@@ -613,7 +613,7 @@ async def _process_critique_async(
 
     syn_path = Path(syn_path).resolve()
     if not syn_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {syn_path}")
+        raise FileNotFoundError(f"File not found: {syn_path}")
 
     # 1. Ler o arquivo .syn (ou .synr)
     doc = parse_synr(syn_path)
@@ -623,15 +623,15 @@ async def _process_critique_async(
     resolved_project = _resolve_project(syn_path, project_path)
     if resolved_project is None:
         raise FileNotFoundError(
-            f"Projeto .synp não encontrado próximo a {syn_path}. "
-            "Use --project para especificá-lo."
+            f".synp project not found near {syn_path}. "
+            "Use --project to set it."
         )
     ctx = load_project(resolved_project, load_annotations=True)
     _colisoes = reserved_field_collisions(ctx.get("item_fields") or {})
     if _colisoes:
         _log.warning(
-            "Campo(s) do template com nome de tag reservada da revisão: %s. "
-            "`# $<nome>:` é lido como diagnóstico, não como correção desses campos.",
+            "Template field(s) named like a reserved review tag: %s. "
+            "`# $<name>:` is read as a diagnostic, not as a correction of those fields.",
             ", ".join(_colisoes),
         )
 
@@ -639,7 +639,7 @@ async def _process_critique_async(
     items_with_bibrefs = _extract_item_blocks_with_bibrefs(syn_content)
     total_items = len(items_with_bibrefs)
     _log.info(
-        "Critique de %s: %d ITEM(s) encontrado(s), limiar=%.2f",
+        "Critique of %s: %d ITEM(s) found, threshold=%.2f",
         syn_path.name, total_items, suspicion_threshold,
     )
 
@@ -695,7 +695,7 @@ async def _process_critique_async(
     # 6. Contabilizar
     items_flagged = sum(1 for r in revision_results if r is not None)
     _log.info(
-        "Critique concluído: %d/%d ITEMs com score >= %.2f",
+        "Critique finished: %d/%d ITEMs with score >= %.2f",
         items_flagged, total_items, suspicion_threshold,
     )
 
@@ -738,13 +738,13 @@ async def _process_critique_async(
 
     agreement = 1.0 - suspicion_rate
     summary = (
-        f"Critique concluído em {elapsed:.1f}s\n"
-        f"  Origem:    {syn_path.name}\n"
-        f"  Saída:     {output_path}\n"
-        f"  ITEMs:     {total_items} total | {items_flagged} com revisão\n"
-        f"  Concordância: {agreement:.3f}\n"
-        f"  Modelo:    {llm_client.model}\n"
-        f"  Limiar:    {suspicion_threshold}\n"
+        f"Critique finished in {elapsed:.1f}s\n"
+        f"  Input:     {syn_path.name}\n"
+        f"  Output:    {output_path}\n"
+        f"  ITEMs:     {total_items} total | {items_flagged} with review\n"
+        f"  Agreement: {agreement:.3f}\n"
+        f"  Model:     {llm_client.model}\n"
+        f"  Threshold: {suspicion_threshold}\n"
         f"  {llm_client.usage.summary_line()}"
     )
 
@@ -756,10 +756,10 @@ async def _process_critique_async(
     if format == "verbose":
         header_str = (
             f"# synesis-coder critique\n"
-            f"# origem: {syn_path.name}\n"
-            f"# saída: {output_path.name}\n"
-            f"# ITEMs: {total_items} | revisados: {items_flagged}\n"
-            f"# modelo: {llm_client.model} | limiar: {suspicion_threshold}\n"
+            f"# input: {syn_path.name}\n"
+            f"# output: {output_path.name}\n"
+            f"# ITEMs: {total_items} | reviewed: {items_flagged}\n"
+            f"# model: {llm_client.model} | threshold: {suspicion_threshold}\n"
             f"# {llm_client.usage.summary_line()}\n"
         )
         return header_str + "\n" + summary
@@ -790,14 +790,14 @@ def _calibration_warning(agreement: float, total_items: int) -> Optional[str]:
         return None
 
     return (
-        f"AVISO: concordância de {agreement:.3f} está abaixo de "
+        f"WARNING: agreement of {agreement:.3f} is below "
         f"{AGREEMENT_WARNING_THRESHOLD:.2f}.\n"
-        "  Isso sugere revisor descalibrado ou limiar baixo demais — não "
-        "necessariamente\n"
-        "  anotações ruins. Antes de incorporar, verifique por amostragem se as "
-        "revisões\n"
-        "  apontam violações reais da régua do template ou apenas leituras "
-        "alternativas."
+        "  This suggests a miscalibrated reviewer or a threshold set too low — not "
+        "necessarily\n"
+        "  bad annotations. Before incorporating, check by sampling whether the "
+        "reviews\n"
+        "  point to real violations of the template's rubric or only to alternative "
+        "readings."
     )
 
 

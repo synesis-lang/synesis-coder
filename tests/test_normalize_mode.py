@@ -576,7 +576,7 @@ END ITEM
                 model="mock-model",
             )
 
-        assert "Normalize concluído" in result
+        assert "Normalize finished" in result
         output_files = list(tmp_path.glob("*.synr"))
         assert len(output_files) >= 1
 

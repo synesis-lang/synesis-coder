@@ -190,10 +190,10 @@ class BatchProgress:
         # limpa não carrega "0 falhas · 0 correções · 0 fallbacks".
         signals = []
         if self.failed:
-            signals.append(f"{self.failed} {_plural(self.failed, 'falha')}")
+            signals.append(f"{self.failed} {_plural(self.failed, 'failure')}")
         corrections = _counter(self.usage, "corrections")
         if corrections:
-            signals.append(f"{corrections} {_plural(corrections, 'correção', 'correções')}")
+            signals.append(f"{corrections} {_plural(corrections, 'correction', 'corrections')}")
         fallbacks = _counter(self.usage, "schema_fallbacks")
         if fallbacks:
             signals.append(f"{fallbacks} fallback{'s' if fallbacks > 1 else ''}")

@@ -137,8 +137,10 @@ def _as_list(value) -> list:
 
 
 def _concept_key(concept: str) -> str:
-    """Igualdade do contrato da linguagem (`normalize_code`): caixa e espaços."""
-    return " ".join(str(concept).strip().split()).lower()
+    """Igualdade do contrato da linguagem (`normalize_code`): NFC, caixa e espaços."""
+    from synesis_coder.identity import concept_key
+
+    return concept_key(concept)
 
 
 def item_concepts(item, item_fields: dict) -> dict[str, list[tuple[str, str]]]:
@@ -200,6 +202,11 @@ def definition_field(ontology_fields: dict) -> str | None:
     Acceptance, mas não é contrato da linguagem). Vale o campo cuja descrição
     declara definição ("defin…"); sem isso, o único TEXT do ONTOLOGY; senão, None.
     """
+    # Com papel, a definição é o campo `NOTE DEFINITION` (Spec ROLE/EXPORT §11,
+    # item 7); a heurística pela descrição só vale em templates sem esse papel.
+    for name, spec in sorted((ontology_fields or {}).items()):
+        if getattr(spec, "role", None) == "NOTE DEFINITION":
+            return str(name)
     textos = [
         (name, spec) for name, spec in sorted((ontology_fields or {}).items())
         if spec.type == FieldType.TEXT
