@@ -104,6 +104,24 @@ class TestPromptOnlyContract:
         assert get_concurrent(5) == 1                      # env vence default
         assert get_concurrent(5, flag=3) == 3              # flag vence env
 
+    def test_concurrent_flag_is_parsed_as_int(self):
+        """`--concurrent 5` chegava como '5' e derrubava o semáforo
+        ("'<' not supported between 'str' and 'int'"). Todo comando que tem a
+        flag converte para inteiro e recusa valor menor que 1."""
+        from synesis_coder.cli import main
+
+        commands = [
+            (name, cmd) for name, cmd in main.commands.items()
+            if any(p.name == "concurrent" for p in cmd.params)
+        ]
+        assert len(commands) >= 8
+        for name, cmd in commands:
+            ctx = cmd.make_context(name, ["--help"], resilient_parsing=True)
+            param = next(p for p in cmd.params if p.name == "concurrent")
+            assert param.type_cast_value(ctx, "5") == 5, name
+            result = _run(name, "--concurrent", "0")
+            assert result.exit_code != 0 and "--concurrent" in result.output, name
+
     def test_concurrent_env_rejects_invalid_values(self, monkeypatch):
         # Configuração inválida não pode derrubar a campanha nem virar 0
         # (que travaria o semáforo): cai no default do comando.

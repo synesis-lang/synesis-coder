@@ -458,9 +458,13 @@ def _collect_includes(
     # `SHARED` é opcional e não-capturante: só ONTOLOGY o aceita na gramática,
     # mas tolerá-lo aqui para os três tipos mantém a regex simples sem risco
     # (um `INCLUDE SHARED ANNOTATIONS` inválido seria barrado pelo compilador).
+    # Ancorada no início da linha: um INCLUDE comentado (`# INCLUDE SHARED
+    # ONTOLOGY "../ontologia.syno"`) não é include. Sem a âncora, o coder lia o
+    # arquivo que o compilador ignora — e um .syno vazio derrubava o modo
+    # ontology com "Token inesperado <EOF>" (Phishing/UFG, 2026-10-14).
     include_pattern = re.compile(
-        r'INCLUDE\s+(SHARED\s+)?(ANNOTATIONS|ONTOLOGY|BIBLIOGRAPHY)\s+"([^"]+)"',
-        re.IGNORECASE,
+        r'^[ \t]*INCLUDE\s+(SHARED\s+)?(ANNOTATIONS|ONTOLOGY|BIBLIOGRAPHY)\s+"([^"]+)"',
+        re.IGNORECASE | re.MULTILINE,
     )
 
     for match in include_pattern.finditer(project_content):

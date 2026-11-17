@@ -594,7 +594,7 @@ def item(project, bibref, text, output_format, model, thinking_budget,
 @click.option("--output-dir", "--output", "output_dir", default=None, type=click.Path(path_type=Path),
               help="Output directory for the generated .syn files (a folder, not a file path). "
                    "Default: current directory.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--batch-size", default=25, show_default=True,
               help="Batch size (project reloaded between batches).")
@@ -684,7 +684,7 @@ def abstract(project, bib_path, output_dir, concurrent, batch_size, per_referenc
 @click.option("--output-dir", "--output", "output_dir", default=None, type=click.Path(path_type=Path),
               help="Output directory for the generated .syn files (one per record). "
                    "Default: current directory.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--single-file", "single_file", is_flag=True, default=False,
               help="Write a single dataset.syn instead of one .syn per record.")
@@ -738,7 +738,7 @@ def dataset(project, output_dir, concurrent, single_file, dataset_glob, model, l
               help="Maximum chunk size in characters.")
 @click.option("--overlap", default=2400, show_default=True,
               help="Overlap between consecutive chunks in characters.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--format", "output_format", type=click.Choice(["plain", "verbose"]),
               default="plain", show_default=True, help="Summary output format.")
@@ -806,7 +806,7 @@ def document(project, bibref, input_path, output_path, chunk_size, overlap,
               help="Output path for the generated .syno file. Required unless --prompt-only.")
 @click.option("--update", is_flag=True, default=False,
               help="Only generate entries for codes not yet defined in the .syno.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--format", "output_format", type=click.Choice(["plain", "verbose"]),
               default="plain", show_default=True, help="Summary output format.")
@@ -869,7 +869,7 @@ def ontology(project, output_path, update, concurrent, output_format, model,
               help="Path to the .synp file. Auto-detected from the .syn directory if omitted.")
 @click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
               help="Output path for the .synr file. Defaults to same name as .syn with .synr extension.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--sensitivity", default=None,
               help="How readily to flag: lenient | standard | strict, or a number [0.0-1.0]. "
@@ -988,7 +988,7 @@ def anchor(syn_file, project_path, field, strict):
               help="Path to the .synp file. Auto-detected if omitted.")
 @click.option("--output-dir", "output_dir", default=None, type=click.Path(path_type=Path),
               help="Output directory for normalized .synr files. Defaults to input directory.")
-@click.option("--concurrent", default=None, type=int,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--confidence", "confidence_threshold", default=None, type=float,
               help="Minimum confidence to accept canonicalization [0.0–1.0]. Default: 0.65.")
@@ -1057,7 +1057,7 @@ def incorporate(synr_file, project_path, output_path, output_format, overwrite, 
               help="Path to the .synp file. Auto-detected from the .syn directory if omitted.")
 @click.option("--output", "output_path", default=None, type=click.Path(path_type=Path),
               help="Output path for the refined .syn. Defaults to <stem>_refined.syn.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of ITEMs refined simultaneously.")
 @click.option("--max-iter", "max_iter", default=None, type=int,
               help="Maximum refinement iterations per ITEM. Default: SYNESIS_CODER_REFINE_MAX_ITER or 2.")
@@ -1137,7 +1137,7 @@ def refine(syn_file, project_path, output_path, concurrent, max_iter,
               type=click.Choice(["vary", "didactic", "counterfactual"]),
               default=["vary"], show_default=True,
               help="LLM enrichment type(s). Can be repeated.")
-@click.option("--concurrent", default=None,
+@click.option("--concurrent", default=None, type=click.IntRange(min=1),
               help="Maximum number of simultaneous LLM calls.")
 @click.option("--format", "output_format", type=click.Choice(["plain", "verbose"]),
               default="plain", show_default=True, help="Summary output format.")

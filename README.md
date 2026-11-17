@@ -20,7 +20,7 @@ from the project template.
 | Package | This version | Requires `synesis` | Python |
 |---|---|---|---|
 | synesis | 0.13.4 | — | ≥3.10 |
-| synesis-coder | 0.14.1 | ≥0.13.3 | ≥3.10 |
+| synesis-coder | 0.14.2 | ≥0.13.3 | ≥3.10 |
 | synesis-lsp | 0.24.0 | ≥0.13.4 | ≥3.10 |
 | synesis-graph | 0.11.0 | ≥0.10.0 | ≥3.10 |
 

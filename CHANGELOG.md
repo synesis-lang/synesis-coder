@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.14.2] — 2026-11-16
+
+Duas correções de execução. Continua exigindo `synesis>=0.13.3`.
+
+### Fixed — `INCLUDE` comentado no `.synp` era lido
+
+- O coder achava os `INCLUDE` do `.synp` por expressão regular sem âncora
+  de linha, e um include comentado (`# INCLUDE SHARED ONTOLOGY "..."`) era
+  lido como se valesse. O compilador o ignora; o coder lia o arquivo. Um
+  `.syno` vazio derrubava o modo `ontology` com "Token inesperado <EOF>"
+  (Phishing/UFG, 2026-10-14).
+- A expressão agora exige o `INCLUDE` no início da linha (após espaços).
+- Testes em `tests/test_project_loader_includes.py`.
+
+### Fixed — `--concurrent N` derrubava a campanha
+
+- A opção chegava como texto em 7 dos 8 comandos (`abstract`, `document`,
+  `dataset`, `ontology`, `critique`, `refine`, `finetune`; só o `normalize`
+  já convertia), e o
+  `asyncio.Semaphore` recebia `'5'`: a execução morria logo após o banner com
+  `'<' not supported between instances of 'str' and 'int'`, antes da primeira
+  chamada ao modelo. Observado na campanha de ontologia do face85.
+- As 8 opções passam a usar `click.IntRange(min=1)`: o valor chega como
+  inteiro, e `--concurrent 0` é recusado na hora, em vez de travar o semáforo.
+- Teste: `test_concurrent_flag_is_parsed_as_int` percorre todos os comandos
+  que têm a flag (falha no código anterior).
+
+---
+
 ## [0.14.1] — 2026-10-14
 
 Requer `synesis>=0.13.3` (antes 0.13.1): o compilador entrega as GUIDELINES como

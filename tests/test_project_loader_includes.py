@@ -125,3 +125,36 @@ class TestCombinedDirectives:
         assert len(ann) == 2
         assert len(onto) == 1
         assert list(bib) == ["refs.bib"] and "@Article" in bib["refs.bib"]
+
+
+class TestCommentedIncludes:
+    def test_commented_include_is_ignored(self, tmp_path: Path):
+        """`# INCLUDE ...` é comentário: o compilador o ignora, o coder também.
+
+        Regressão (Phishing/UFG, 2026-10-14): o .synp trazia
+        `# INCLUDE SHARED ONTOLOGY "../ontologia.syno"` comentado, apontando
+        para um .syno vazio; o coder o lia e o modo ontology morria com
+        "Token inesperado <EOF>", enquanto `synesis compile` passava.
+        """
+        proj = tmp_path / "proj"
+        _write(tmp_path / "ontologia.syno", "# vazia\n")
+        _write(proj / "local.syno", "ONTOLOGY x\nEND ONTOLOGY\n")
+        project = (
+            'TEMPLATE "t.synt"\n'
+            'INCLUDE ONTOLOGY "local.syno"\n'
+            '# INCLUDE SHARED ONTOLOGY "../ontologia.syno"\n'
+            '    # INCLUDE ANNOTATIONS "x/*.syn"\n'
+        )
+
+        _ann, onto, _bib = _collect_includes(project, proj)
+
+        assert len(onto) == 1, f"include comentado foi lido: {list(onto)}"
+        assert any("local.syno" in k for k in onto)
+
+    def test_indented_include_still_works(self, tmp_path: Path):
+        _write(tmp_path / "notes.syn", "SOURCE @x\nEND SOURCE\n")
+        project = 'TEMPLATE "t.synt"\n    INCLUDE ANNOTATIONS "notes.syn"\n'
+
+        ann, _onto, _bib = _collect_includes(project, tmp_path)
+
+        assert len(ann) == 1
