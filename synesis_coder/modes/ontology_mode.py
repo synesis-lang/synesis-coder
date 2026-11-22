@@ -372,6 +372,8 @@ def process_ontology(
     overwrite: bool = False,
     backup: bool = False,
     prompt_only: bool = False,
+    *,
+    client: Optional[object] = None,
 ) -> str:
     """Gera entradas ONTOLOGY (.syno) a partir do corpus anotado do projeto.
 
@@ -384,6 +386,8 @@ def process_ontology(
         format: "plain" ou "verbose".
         overwrite: Se True, sobrescreve output existente sem confirmação.
         backup: Se True, cria backup (.syno.bak) antes de gravar.
+        client: Cliente de modelo a usar no lugar de `LLMClient(...)`, com a mesma
+            interface (teste, registro de chamadas, handoff). None = padrão.
         prompt_only: Se True, retorna o prompt montado em Markdown e não chama
             o LLM (nenhum arquivo é escrito).
 
@@ -418,7 +422,7 @@ def process_ontology(
     return asyncio.run(
         _process_ontology_async(
             project_path, output_path, update, concurrent, model, format,
-            overwrite, backup,
+            overwrite, backup, client=client,
         )
     )
 
@@ -432,6 +436,7 @@ async def _process_ontology_async(
     format: str,
     overwrite: bool = False,
     backup: bool = False,
+    client: Optional[object] = None,
 ) -> str:
     """Implementação assíncrona da geração de ontologia."""
 
@@ -522,7 +527,7 @@ async def _process_ontology_async(
     )
 
     # 5. Inicializar LLM client
-    llm_client = LLMClient(model=model)
+    llm_client = client if client is not None else LLMClient(model=model)
     runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     # 6. Processar concorrentemente

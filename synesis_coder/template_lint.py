@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from typing import Dict, List, Set, Tuple
 
@@ -57,12 +58,59 @@ def altered_guideline_lines(template_content: str, field_specs: Dict) -> List[Tu
     return altered
 
 
+REQUIRE_GUIDELINES_ENV = "SYNESIS_CODER_REQUIRE_GUIDELINES"
+
+
+def fields_without_guidelines(field_specs: Dict) -> List[Tuple[str, str, str]]:
+    """Campos do template sem GUIDELINES: (nome, tipo, escopo), em ordem de nome.
+
+    Sem GUIDELINES o coder manda ao modelo só a DESCRIPTION, e sem as duas, nada:
+    o modelo improvisa a instrução, e o projeto compartilhado deixa de carregar
+    o método daquele campo. Vale para todo escopo (SOURCE, ITEM, ONTOLOGY),
+    inclusive campos preenchidos à mão, onde a GUIDELINE documenta o critério.
+    """
+    missing: List[Tuple[str, str, str]] = []
+    for name in sorted(field_specs):
+        spec = field_specs[name]
+        if not (getattr(spec, "guidelines", None) or "").strip():
+            ftype = getattr(getattr(spec, "type", None), "name", str(getattr(spec, "type", "")))
+            scope = getattr(getattr(spec, "scope", None), "name", str(getattr(spec, "scope", "")))
+            missing.append((name, ftype, scope))
+    return missing
+
+
+def guidelines_required() -> bool:
+    """Exigência ligada por SYNESIS_CODER_REQUIRE_GUIDELINES (ou --require-guidelines)."""
+    return os.environ.get(REQUIRE_GUIDELINES_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def warn_template_issues(template_name: str, template_content: str, field_specs: Dict) -> None:
-    """Emite avisos sobre o template, uma única vez por template e conteúdo."""
+    """Emite avisos sobre o template, uma única vez por template e conteúdo.
+
+    Com a exigência de GUIDELINES ligada, campo sem GUIDELINES é erro
+    (ValueError) a cada carga, não só na primeira.
+    """
+    missing = fields_without_guidelines(field_specs)
+    if missing and guidelines_required():
+        listed = "\n".join(f"  - {name} ({ftype}, {scope})" for name, ftype, scope in missing)
+        raise ValueError(
+            f"{template_name}: {len(missing)} field(s) without GUIDELINES, and GUIDELINES "
+            f"are required ({REQUIRE_GUIDELINES_ENV} / --require-guidelines):\n{listed}"
+        )
+
     key = template_name + ":" + hashlib.sha256(template_content.encode("utf-8")).hexdigest()
     if key in _already_warned:
         return
     _already_warned.add(key)
+
+    if missing:
+        listed = "\n".join(f"  - {name} ({ftype}, {scope})" for name, ftype, scope in missing)
+        logger.warning(
+            "%s: %d field(s) without GUIDELINES. The model receives only the field's "
+            "DESCRIPTION (or nothing) and improvises the instruction. Write GUIDELINES "
+            "for every field, or require them with --require-guidelines:\n%s",
+            template_name, len(missing), listed,
+        )
 
     altered = altered_guideline_lines(template_content, field_specs)
     if not altered:

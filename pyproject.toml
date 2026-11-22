@@ -4,7 +4,7 @@ version = "0.15.0"
 description = "LLM-assisted annotation pipeline for the Synesis ecosystem"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"
+license = "LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception"
 license-files = ["LICENSE", "LICENSE.exception"]
 authors = [
     {name = "De Britto, Christian Maciel", email = "chriseana@gmail.com"}

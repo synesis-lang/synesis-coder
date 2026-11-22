@@ -276,7 +276,9 @@ class TestAvisoDeTemplate:
         with caplog.at_level(logging.WARNING, logger="synesis_coder.template_lint"):
             load_project(synp)
             load_project(synp)
-        avisos = [r for r in caplog.records if "GUIDELINES" in r.getMessage()]
+        # Só o aviso de linhas alteradas pelo parser: o de campos sem GUIDELINES
+        # (D-3, 2026-11-20) é outro aviso, também emitido uma vez por template.
+        avisos = [r for r in caplog.records if "reach the model differently" in r.getMessage()]
         assert len(avisos) == 1
         assert "INCLUDE the technology domain" in avisos[0].getMessage()
 

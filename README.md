@@ -46,11 +46,18 @@ synesis-coder --version
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Copy `.env.example` to a `.env` **in your project folder** (where you run
+`synesis-coder`) and fill in your credentials:
 
 ```bash
-cp .env.example .env
+cp .env.example /path/to/your/project/.env
 ```
+
+Settings are read in this order, first wins: environment variables, then the
+project `.env` (found from the folder where the command runs), then an optional
+shared defaults file named by `SYNESIS_CODER_ENV_FILE`. A `.env` next to where
+synesis-coder is installed is **not** read: results must not depend on the
+installation.
 
 ```dotenv
 # Backend Anthropic (default)
@@ -605,7 +612,7 @@ This program is distributed under the **GNU Affero General Public License,
 version 3 only (AGPL-3.0-only), with the Synesis Data-Output Exception** — see
 [LICENSE](LICENSE) and [LICENSE.exception](LICENSE.exception).
 
-SPDX identifier: `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+SPDX identifier: `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`
 
 **Your research data and generated outputs are yours.** The files you feed to
 synesis-coder and the artifacts it produces from them — annotation blocks,

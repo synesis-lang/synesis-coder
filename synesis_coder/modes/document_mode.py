@@ -872,6 +872,8 @@ def process_document(
     overwrite: bool = False,
     backup: bool = False,
     prompt_only: bool = False,
+    *,
+    client: Optional[object] = None,
 ) -> str:
     """Processa um documento longo, gerando anotações Synesis (.syn).
 
@@ -889,6 +891,8 @@ def process_document(
             ao lado do arquivo de saída (<projeto>_<bibref>_debug.md).
         overwrite: Se True, sobrescreve output existente sem confirmação.
         backup: Se True, cria backup (.syn.bak) do output existente antes de gravar.
+        client: Cliente de modelo a usar no lugar de `LLMClient(...)`, com a mesma
+            interface (teste, registro de chamadas, handoff). None = padrão.
         prompt_only: Se True, retorna o prompt montado em Markdown e não chama
             o LLM (nenhum arquivo é escrito).
 
@@ -915,7 +919,7 @@ def process_document(
         _process_document_async(
             project_path, bibref, input_path, output_path,
             chunk_size, overlap, concurrent, model, format, debug,
-            overwrite, backup,
+            overwrite, backup, client=client,
         )
     )
 
@@ -994,6 +998,7 @@ async def _process_document_async(
     debug: bool = False,
     overwrite: bool = False,
     backup: bool = False,
+    client: Optional[object] = None,
 ) -> str:
     """Implementação assíncrona do processamento de documento."""
 
@@ -1023,7 +1028,7 @@ async def _process_document_async(
 
     # 4. Inicializar LLM client (com recorder de debug se solicitado)
     recorder = DebugRecorder() if debug else None
-    llm_client = LLMClient(model=model, recorder=recorder)
+    llm_client = client if client is not None else LLMClient(model=model, recorder=recorder)
     runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     if recorder is not None:

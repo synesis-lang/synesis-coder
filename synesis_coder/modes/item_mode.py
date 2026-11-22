@@ -29,6 +29,8 @@ def process_item(
     format: Literal["plain", "verbose"] = "plain",
     model: str | None = None,
     prompt_only: bool = False,
+    *,
+    client: object | None = None,
 ) -> str:
     """Gera um bloco ITEM Synesis a partir de um texto e bibref.
 
@@ -36,6 +38,8 @@ def process_item(
         project_path: Caminho para o arquivo .synp.
         bibref: Referência bibliográfica (ex: "smith2024").
         text: Texto a ser codificado.
+        client: Cliente de modelo a usar no lugar de `LLMClient(...)`, com a mesma
+            interface (teste, registro de chamadas, handoff). None = padrão.
         format: "plain" retorna apenas o Synesis gerado;
                 "verbose" inclui log de status e diagnósticos.
         model: ID do modelo LLM (sobrescreve env SYNESIS_CODER_MODEL).
@@ -62,7 +66,7 @@ def process_item(
     # 1b. Pré-validar bibref (abort precoce — elimina E001 antes de gastar LLM)
     assert_bibref_known(ctx, bibref)
 
-    client = LLMClient(model=model)
+    client = client if client is not None else LLMClient(model=model)
     runtime_banner(client, format=format)
 
     # 2-3. Caminho JSON (Opção 3): LLM devolve valores → assembler monta o bloco.

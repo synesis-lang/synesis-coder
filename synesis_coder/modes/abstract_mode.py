@@ -741,6 +741,8 @@ def process_abstract(
     cooldown: str | float | None = None,
     resume: bool = False,
     split_every: Optional[int] = None,
+    *,
+    client: Optional[object] = None,
 ) -> str:
     """Processa corpus .bib em lote, gerando anotações Synesis (.syn).
 
@@ -756,6 +758,8 @@ def process_abstract(
         format: "plain" ou "verbose".
         debug: Se True, gera um relatório Markdown de auditoria do pipeline LLM
             no diretório de saída (<projeto>_abstract_debug.md).
+        client: Cliente de modelo a usar no lugar de `LLMClient(...)`, com a mesma
+            interface (teste, registro de chamadas, handoff). None = padrão.
         prompt_only: Se True, retorna o prompt montado em Markdown e não chama
             o LLM (nenhum arquivo é escrito).
 
@@ -791,6 +795,7 @@ def process_abstract(
             cooldown_seconds=resolve_cooldown_setting(cooldown),
             resume=resume,
             split_every=split_every,
+            client=client,
         )
     )
 
@@ -810,6 +815,7 @@ async def _process_abstract_async(
     cooldown_seconds: Optional[float] = None,
     resume: bool = False,
     split_every: Optional[int] = None,
+    client: Optional[object] = None,
 ) -> str:
     """Implementação assíncrona do processamento de abstracts.
 
@@ -877,7 +883,7 @@ async def _process_abstract_async(
         unit_label="Reference",
         coding_step_title="Step 1 — Coding the abstracts",
     ) if debug else None
-    llm_client = LLMClient(model=model, recorder=recorder)
+    llm_client = client if client is not None else LLMClient(model=model, recorder=recorder)
     runtime_banner(llm_client, format=format, concurrent=concurrent)
 
     if recorder is not None:

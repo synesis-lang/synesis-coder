@@ -175,12 +175,16 @@ def process_dataset(
     format: str = "plain",
     debug: bool = False,
     dataset_glob: str | None = None,
+    *,
+    client: object | None = None,
 ) -> str:
     """Processa um corpus TOML em lote, gerando anotações Synesis (.syn).
 
     Args:
         project_path: Caminho do .synp (declara INCLUDE DATASET).
         output_dir: Diretório de saída dos .syn (um por registro).
+        client: Cliente de modelo a usar no lugar de `LLMClient(...)`, com a mesma
+            interface (teste, registro de chamadas, handoff). None = padrão.
         concurrent: Máximo de chamadas LLM simultâneas.
         per_record: Um .syn por registro (padrão).
         model: ID do modelo LLM.
@@ -196,7 +200,7 @@ def process_dataset(
     return asyncio.run(
         _process_dataset_async(
             project_path, output_dir, concurrent, per_record, model, format, debug,
-            dataset_glob,
+            dataset_glob, client=client,
         )
     )
 
@@ -210,6 +214,7 @@ async def _process_dataset_async(
     format: str,
     debug: bool,
     dataset_glob: str | None = None,
+    client: object | None = None,
 ) -> str:
     """Implementação assíncrona: gera SOURCE + ITEMs por registro TOML."""
     ctx = load_project(
@@ -244,7 +249,10 @@ async def _process_dataset_async(
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    llm_client = LLMClient(model=model) if model else LLMClient()
+    if client is not None:
+        llm_client = client
+    else:
+        llm_client = LLMClient(model=model) if model else LLMClient()
     semaphore = asyncio.Semaphore(concurrent)
     external = _external_origin_fields(ctx)
 

@@ -96,7 +96,7 @@ class TestLicenseMetadata:
     def test_uses_pep639_license_expression(self, sdist_metadata):
         fields, _ = sdist_metadata
         assert fields.get("License-Expression") == [
-            "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"
+            "LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception"
         ]
 
     def test_no_obsolete_license_field(self, sdist_metadata):

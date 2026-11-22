@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Fixed — identificador SPDX da licença (L-1)
+
+- `license` passa de `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception` para
+  `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`. Em SPDX, `AND` significa duas
+  licenças cumulativas, não uma permissão adicional sobre a AGPL; uma exceção não
+  cadastrada se representa por um único `LicenseRef` com o conjunto dos termos
+  (`LICENSE` + `LICENSE.exception`). A licença em si não mudou. O `CITATION.cff` segue
+  `AGPL-3.0-only` (o CFF só aceita a lista SPDX).
+
+
+### Fixed — `anchor` relatava "no problems" sem ter verificado (D-2)
+
+- Cada citação recebe um de três estados: **found**, **not found** ou
+  **unverifiable** (sem texto-fonte). Antes, uma referência sem abstract era
+  pulada e o relatório dizia "no problems"; agora ela aparece como não
+  verificável, e o relatório só diz "Verified." sem nenhuma citação não
+  encontrada ou não verificável.
+- Todos os campos QUOTATION de cada ITEM são verificados, em todas as
+  ocorrências e com as linhas de continuação. Antes, só o primeiro campo
+  preenchido e só a primeira linha do valor.
+- `--source-dir` lê os textos de entrevistas e documentos (`<bibref>.txt|.md`,
+  com a mesma limpeza do modo `document`); eles têm prioridade sobre o abstract.
+- `--literal` compara sem normalização; o relatório declara a normalização
+  usada. `--json` grava o relatório completo.
+- `--strict` falha também com citação não verificável.
+- API: `check_quotations`, `summarize`, `format_results`; `check_anchoring` e
+  `format_report` mantêm a assinatura, e `check_anchoring` passou a verificar
+  todos os campos.
+
+### Added — aviso de campo sem GUIDELINES e `--require-guidelines` (D-3)
+
+- Ao carregar o projeto, o coder avisa (uma vez por template) quais campos não
+  têm GUIDELINES: sem elas o modelo recebe só a DESCRIPTION, ou nada.
+- `synesis-coder --require-guidelines …` ou `SYNESIS_CODER_REQUIRE_GUIDELINES=1`
+  (inclusive no `.env` do projeto) transforma o aviso em erro, a cada carga.
+
+### Added — cliente de modelo injetável nos modos de codificação (D-4)
+
+- `process_item`, `process_abstract`, `process_document`, `process_dataset` e
+  `process_ontology` aceitam `client=` (só por palavra-chave, padrão `None` =
+  comportamento atual). Permite cliente de teste, de registro de chamadas ou de
+  handoff sem substituir `LLMClient` no módulo. A CLI não muda.
+
+### Fixed — configuração lida do lugar onde o coder está instalado (D-6)
+
+- `llm_client` chamava `load_dotenv()` na importação, procurando um `.env` a
+  partir da pasta do pacote até a raiz do disco, e a CLI lia sempre o `.env` da
+  pasta acima do pacote. O resultado dependia de onde o coder estava instalado:
+  uma instalação editável levava o `.env` do repositório (modelo, idioma) para
+  todo projeto, e o `.env` do projeto não conseguia sobrescrever esses valores
+  (`override=False`). `_validate_phase_env` (`critique`, `normalize`, `refine`)
+  repetia a carga pelo mesmo caminho.
+- Agora: variável de ambiente > `.env` do projeto (a partir da pasta onde o
+  comando roda) > arquivo de padrões opcional em `SYNESIS_CODER_ENV_FILE`.
+- **Mudança de comportamento:** quem contava com o `.env` ao lado da instalação
+  (por exemplo, o do repositório numa instalação editável) deve copiá-lo para a
+  pasta do projeto ou apontar `SYNESIS_CODER_ENV_FILE` para ele. Quem usa o
+  coder como biblioteca carrega a configuração por conta própria.
+
+### Fixed — primeira ontologia (D-1, via synesis C-2)
+
+- `ontology` não criava um `.syno` novo porque validava o estado anterior vazio,
+  que o compilador rejeitava. Resolvido pela correção C-2 do synesis; exige
+  `synesis` com essa correção (subir o piso `synesis>=` na release).
+
+
 ## [0.15.0] — 2026-11-17
 
 ### Changed — saídas em inglês (idioma oficial dos CLIs, 2026-11-17)

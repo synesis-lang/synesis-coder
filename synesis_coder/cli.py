@@ -21,15 +21,22 @@ logging.addLevelName(22, "DEST")
 from dotenv import find_dotenv as _find_dotenv
 from dotenv import load_dotenv as _load_dotenv
 
-# Precedência: variável de ambiente > .env do projeto > .env do coder.
+# Precedência: variável de ambiente > .env do projeto > arquivo de padrões
+# opcional (SYNESIS_CODER_ENV_FILE).
 # O .env do projeto é procurado a partir da pasta onde o comando roda
 # (usecwd=True); sem isso, o python-dotenv sobe a partir do PACOTE e o .env do
 # pesquisador nunca era lido. É ali que o projeto declara, por exemplo,
 # SYNESIS_CODER_LANGUAGE (Social Acceptance em inglês, face85 em português).
+# Antes, o .env da pasta acima do pacote também era lido, sempre: o resultado
+# dependia de ONDE o coder estava instalado (uma instalação editável puxava o
+# .env do repositório para todo projeto). Agora um arquivo de padrões
+# compartilhado só entra se declarado explicitamente (D-6, 2026-11-20).
 _project_env = _find_dotenv(usecwd=True)
 if _project_env:
     _load_dotenv(_project_env, override=False)
-_load_dotenv(Path(__file__).parent.parent / ".env", override=False)
+_defaults_env = os.environ.get("SYNESIS_CODER_ENV_FILE", "").strip()
+if _defaults_env:
+    _load_dotenv(_defaults_env, override=False)
 
 if hasattr(sys.stdout, "buffer") and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -96,9 +103,8 @@ def get_concurrent(default: int, flag: int | None = None) -> int:
 
 
 def _validate_phase_env(phase_name: str) -> str:
-    from dotenv import load_dotenv
-    load_dotenv()
-
+    # O .env do projeto já foi carregado na importação deste módulo. Um
+    # `load_dotenv()` aqui procuraria a partir da pasta do pacote (D-6).
     phase_upper = phase_name.upper()
     phase_model_var = f"SYNESIS_CODER_{phase_upper}_MODEL"
 
@@ -256,6 +262,7 @@ def _build_main_help() -> str:
         ("--format TEXT",  "Output format (Ex: 'verbose' to display token usage)"),
         ("-v, --verbose",  "Increase log verbosity (DEBUG). Repeatable."),
         ("-q, --quiet",    "Decrease log verbosity (-q WARNING, -qq ERROR). Repeatable."),
+        ("--require-guidelines", "Fail when a template field has no GUIDELINES"),
         ("--version",      "Show version and exit"),
         ("--help",         "Show this message and exit"),
     ]
@@ -562,8 +569,15 @@ class _SynesisGroup(click.Group):
               help="Increase log verbosity (-v for DEBUG). Repeatable.")
 @click.option("-q", "--quiet", count=True, default=0,
               help="Decrease log verbosity (-q WARNING, -qq ERROR). Repeatable.")
+@click.option("--require-guidelines", "require_guidelines", is_flag=True, default=False,
+              help="Fail when a template field has no GUIDELINES "
+                   "(same as SYNESIS_CODER_REQUIRE_GUIDELINES=1).")
 @click.pass_context
-def main(ctx: click.Context, verbose: int, quiet: int) -> None:
+def main(ctx: click.Context, verbose: int, quiet: int, require_guidelines: bool) -> None:
+    if require_guidelines:
+        from synesis_coder.template_lint import REQUIRE_GUIDELINES_ENV
+
+        os.environ[REQUIRE_GUIDELINES_ENV] = "1"
     _configure_logging(verbose, quiet, print_header=ctx.invoked_subcommand is not None)
     if ctx.invoked_subcommand is None:
         out = _build_main_help()
@@ -1073,6 +1087,12 @@ _EPILOG_ANCHOR = _ex(
     "",
     "  # Check a field other than `text`:",
     "  synesis-coder anchor annotations.syn --project p.synp --field quotation",
+    "",
+    "  # Interviews/documents: sources named <bibref>.txt or .md in a folder",
+    "  synesis-coder anchor annotations.syn --project p.synp --source-dir fontes/",
+    "",
+    "  # Exact comparison (no normalization) and a JSON report:",
+    "  synesis-coder anchor annotations.syn --project p.synp --literal --json anchoring.json",
 )
 
 
@@ -1085,19 +1105,33 @@ _EPILOG_ANCHOR = _ex(
               help="ITEM field holding the source excerpt. Default: the QUOTATION "
                    "field(s) declared in the template.")
 @click.option("--strict", is_flag=True, default=False,
-              help="Exit with code 1 when any excerpt is not anchored.")
-def anchor(syn_file, project_path, field, strict):
-    """Check that each ITEM excerpt occurs in its source abstract.
+              help="Exit with code 1 unless every quotation was found "
+                   "(not found or unverifiable quotations fail).")
+@click.option("--source-dir", "source_dir", default=None,
+              type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Folder with source texts named <bibref>.txt or <bibref>.md "
+                   "(interviews, documents). They take precedence over .bib abstracts. "
+                   "Use the same text that was coded.")
+@click.option("--literal", is_flag=True, default=False,
+              help="Compare quotations exactly, without normalization.")
+@click.option("--json", "json_path", default=None, type=click.Path(path_type=Path),
+              help="Also write the full report (every quotation and its status) as JSON.")
+def anchor(syn_file, project_path, field, strict, source_dir, literal, json_path):
+    """Check that each ITEM quotation occurs in its source.
 
-    Deterministic and free — no LLM call. Complements the compiler, which
-    already validates enums, ranges, REQUIRED fields, BUNDLE and chain
-    relations, but does not verify that the annotated excerpt exists in the
-    source.
+    Every QUOTATION field of every ITEM is checked and gets one of three states:
+    found, not found, or unverifiable (no source text for that reference).
+    Sources: --source-dir texts first, then the abstract in the .bib.
+    Deterministic and free — no LLM call.
     """
+    import json as _json
+
     from synesis_coder.anchor_check import (
-        check_anchoring,
-        format_report,
+        NORMALIZATION,
+        check_quotations,
+        format_results,
         items_without_excerpt,
+        summarize,
     )
     from synesis_coder.modes.critique_mode import _resolve_project, quotation_fields
 
@@ -1112,9 +1146,20 @@ def anchor(syn_file, project_path, field, strict):
         from synesis_coder.project_loader import load_project
         ctx = load_project(resolved, load_annotations=False)
         bib_content = ctx.get("bib_content") or ""
-        if not bib_content:
+
+        sources: dict = {}
+        if source_dir is not None:
+            from synesis_coder.modes.document_mode import read_document
+            from synesis_coder.text_cleaner import clean_document
+
+            for path in sorted(Path(source_dir).iterdir()):
+                if path.suffix.lower() in (".txt", ".md"):
+                    # The same cleaning the `document` mode applies before coding.
+                    sources[path.stem] = clean_document(read_document(path))
+        if not bib_content and not sources:
             click.echo(
-                "Error: project without a bibliography — there is no source to anchor against.",
+                "Error: no source text: the project has no bibliography and no "
+                "--source-dir was given.",
                 err=True,
             )
             sys.exit(1)
@@ -1123,11 +1168,26 @@ def anchor(syn_file, project_path, field, strict):
         total = len(re.findall(r"^ITEM\s+@\S+\s*$", content, re.MULTILINE))
         # O trecho está nos campos QUOTATION do template (o nome varia por projeto).
         fields = [field] if field else quotation_fields(ctx)
-        issues = check_anchoring(content, bib_content, fields=fields)
+        results = check_quotations(content, bib_content, fields, sources=sources, literal=literal)
         missing = items_without_excerpt(content, fields)
-        click.echo(format_report(issues, total, without_excerpt=missing, fields=fields))
+        click.echo(format_results(results, total, missing, fields, literal=literal))
 
-        if issues and strict:
+        summary = summarize(results)
+        if json_path is not None:
+            report = {
+                "file": Path(syn_file).name,
+                "mode": "literal" if literal else "normalized",
+                "normalization": [] if literal else list(NORMALIZATION),
+                "fields": fields,
+                "items": total,
+                "items_without_quotation": missing,
+                "summary": summary,
+                "results": [r.to_dict() for r in results],
+            }
+            Path(json_path).write_text(
+                _json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        if strict and not summary["verified"]:
             sys.exit(1)
     except (FileNotFoundError, ValueError, EnvironmentError) as exc:
         click.echo(f"Error: {exc}", err=True); sys.exit(1)

@@ -31,8 +31,6 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, List, Optional
 
-from dotenv import load_dotenv
-
 from synesis_coder.anthropic_caps import (
     AnthropicCaps,
     plan_request,
@@ -47,8 +45,11 @@ from synesis_coder.anthropic_caps import without as caps_without
 if TYPE_CHECKING:
     from synesis_coder.debug_log import DebugRecorder
 
-# Carrega .env (variáveis de ambiente têm precedência)
-load_dotenv()
+# O .env NÃO é carregado aqui. Um `load_dotenv()` na importação procurava o
+# arquivo a partir da pasta do PACOTE, subindo até a raiz: o resultado dependia
+# de onde o coder estava instalado e podia ler um .env alheio (D-6). Quem
+# carrega a configuração é o ponto de entrada: a CLI (.env do projeto) ou o
+# programa que usa o coder como biblioteca.
 
 _log = logging.getLogger(__name__)
 
