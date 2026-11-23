@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-11-23
+
+### Alterado — piso do compilador
+
+- `synesis>=0.16.0` (era `>=0.15.0`): o compilador passa a gravar caminhos
+  relativos à pasta do projeto (C-3) e o `anchor` lê os `.syn` com as linhas de
+  continuação corrigidas (C-1).
+
 ### Fixed — identificador SPDX da licença (L-1)
 
 - `license` passa de `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception` para
